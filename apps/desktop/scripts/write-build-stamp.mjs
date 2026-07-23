@@ -34,9 +34,9 @@ import { isMain } from "./utils.mjs"
 
 const STAMP_SCHEMA_VERSION = 2
 // Hermes's historical tags use a four-digit calendar year as their major
-// component (for example v2026.7.20). Restrict release majors to two digits
+// component (for example v2026.7.20). Restrict release majors to three digits
 // so these date tags cannot masquerade as the v0.x.y SemVer boundaries.
-const SEMVER_TAG = /^v(0|[1-9]\d?)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+const SEMVER_TAG = /^v(0|[1-9]\d{0,2})\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
 
 /** All-zero placeholder used when no real commit can be resolved. */
 export const FALLBACK_COMMIT = "0000000000000000000000000000000000000000"

@@ -119,3 +119,22 @@ test('deriveVersionMetadata uses the historical release tag only as a transition
   assert.equal(stamp.displayVersion, '0.19.0+3')
   assert.equal(stamp.distance, 3)
 })
+
+test('deriveVersionMetadata accepts three-digit SemVer majors but rejects four-digit CalVer years', () => {
+  const stamp = deriveVersionMetadata(
+    { commit: 'a'.repeat(40), branch: 'feature', dirty: false, source: 'local' },
+    {
+      readFile: () => '__version__ = "999.1.2"\n__release_date__ = "2026.7.20"\n',
+      execFn: command => {
+        if (command.startsWith('git tag --merged')) return 'v2026.7.20\nv999.1.2\n'
+        if (command === 'git rev-list --count v999.1.2..HEAD') return '4'
+        if (command === 'git rev-list --count v2026.7.20..HEAD') return '8'
+        return null
+      }
+    }
+  )
+
+  assert.equal(stamp.baseVersion, '999.1.2')
+  assert.equal(stamp.displayVersion, '999.1.2+4')
+  assert.equal(stamp.distance, 4)
+})
