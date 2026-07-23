@@ -1636,6 +1636,14 @@ export interface Translations {
     tryAgain: string
     notAvailableTitle: string
     unsupportedMessage: string
+    nixPackageTitle: string
+    nixPackageBody: string
+    nixVersion: string
+    nixBaseVersion: string
+    nixBranch: string
+    nixCommit: string
+    nixDirty: string
+    nixViewCommit: string
     connectionRetry: string
     latestBody: string
     latestBodyBackend: string

@@ -4104,6 +4104,12 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "stored_session_id": session_key or "",
         "desktop_contract": DESKTOP_BACKEND_CONTRACT,
         "version": "",
+        "version_base": "",
+        "version_distance": None,
+        "version_commit": "",
+        "version_branch": "",
+        "version_source": "",
+        "version_dirty": False,
         "release_date": "",
         "update_behind": None,
         "update_command": "",
@@ -4111,9 +4117,17 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "profile_name": _current_profile_name(),
     }
     try:
-        from hermes_cli import __version__, __release_date__
+        from hermes_cli import __release_date__
+        from hermes_cli.version_info import get_version_info
 
-        info["version"] = __version__
+        version_info = get_version_info()
+        info["version"] = version_info.derived_version
+        info["version_base"] = version_info.base_version
+        info["version_distance"] = version_info.distance
+        info["version_commit"] = version_info.commit or ""
+        info["version_branch"] = version_info.branch or ""
+        info["version_source"] = version_info.source
+        info["version_dirty"] = version_info.dirty
         info["release_date"] = __release_date__
     except Exception:
         pass

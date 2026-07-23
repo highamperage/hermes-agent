@@ -175,6 +175,12 @@ export interface SessionInfo {
   update_command?: string
   usage?: Usage
   version?: string
+  version_base?: string
+  version_branch?: string
+  version_commit?: string
+  version_distance?: number | null
+  version_dirty?: boolean
+  version_source?: 'build' | 'git' | 'nix' | 'unknown'
 }
 
 export interface Usage {

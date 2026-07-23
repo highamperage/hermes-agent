@@ -14,6 +14,11 @@
   hermesNpmLib,
   electron,
   hermesAgent,
+  rev ? null,
+  revCount ? null,
+  branch ? null,
+  dirty ? false,
+  releaseRevCount ? null,
   ...
 }:
 let
@@ -28,6 +33,8 @@ let
 
   packageJson = builtins.fromJSON (builtins.readFile (npm.src + "/apps/desktop/package.json"));
   version = packageJson.version;
+  distance = if revCount != null && releaseRevCount != null then lib.trivial.max 0 (revCount - releaseRevCount) else null;
+  displayVersion = if distance != null && distance > 0 then "${version}+${toString distance}" else version;
 
   electronHeaders = pkgs.fetchurl {
     url = "https://artifacts.electronjs.org/headers/dist/v${electron.version}/node-v${electron.version}-headers.tar.gz";
@@ -134,7 +141,9 @@ let
         # before the cd.
         cp -rn apps/desktop/dist $out/
 
-        echo '{"schemaVersion":1,"commit":"nix-dummy-commit","branch":"nix","dirty":false,"source":"nix"}' > $out/install-stamp.json
+        cat > $out/install-stamp.json <<'EOF'
+        {"schemaVersion":2,"commit":${builtins.toJSON rev},"branch":${builtins.toJSON branch},"baseVersion":"${version}","displayVersion":"${displayVersion}","distance":${builtins.toJSON distance},"dirty":${if dirty then "true" else "false"},"source":"nix","installMethod":"nix"}
+        EOF
 
         cp -n apps/desktop/package.json $out/
         runHook postInstall
