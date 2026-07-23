@@ -58,7 +58,7 @@ def _skin_color(key: str, fallback: str) -> str:
 # ASCII Art & Branding
 # =========================================================================
 
-from hermes_cli import __version__ as VERSION, __release_date__ as RELEASE_DATE
+from hermes_cli import __version__ as VERSION
 from hermes_cli.version_info import get_version_info
 
 HERMES_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
@@ -460,7 +460,7 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
 def format_banner_version_label() -> str:
     """Return the version label shown in the startup banner title."""
     info = get_version_info()
-    parts = [f"Hermes Agent v{info.derived_version} ({RELEASE_DATE})"]
+    parts = [f"Hermes Agent v{info.derived_version}"]
     if info.branch:
         parts.append(info.branch)
     if info.commit:

@@ -4110,14 +4110,12 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "version_branch": "",
         "version_source": "",
         "version_dirty": False,
-        "release_date": "",
         "update_behind": None,
         "update_command": "",
         "usage": _session_usage_snapshot(session),
         "profile_name": _current_profile_name(),
     }
     try:
-        from hermes_cli import __release_date__
         from hermes_cli.version_info import get_version_info
 
         version_info = get_version_info()
@@ -4128,7 +4126,6 @@ def _session_info(agent, session: dict | None = None) -> dict:
         info["version_branch"] = version_info.branch or ""
         info["version_source"] = version_info.source
         info["version_dirty"] = version_info.dirty
-        info["release_date"] = __release_date__
     except Exception:
         pass
     if agent is not None and not (session or {}).get("_compute_host_active"):

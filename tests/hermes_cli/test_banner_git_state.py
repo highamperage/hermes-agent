@@ -13,7 +13,7 @@ def test_format_banner_version_label_without_git_state():
     ):
         value = banner.format_banner_version_label()
 
-    assert value == f"Hermes Agent v{banner.VERSION} ({banner.RELEASE_DATE})"
+    assert value == f"Hermes Agent v{banner.VERSION}"
 
 
 def test_format_banner_version_label_includes_derived_version_and_provenance():

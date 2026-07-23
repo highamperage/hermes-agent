@@ -31,8 +31,10 @@ let
     ];
   };
 
-  packageJson = builtins.fromJSON (builtins.readFile (npm.src + "/apps/desktop/package.json"));
-  version = packageJson.version;
+  # The Electron manifest identifies the UI project, but Hermes's version is
+  # owned by the root Python package. Keep the Nix derivation and the manifest
+  # shipped to Electron aligned with that one canonical value.
+  version = (builtins.fromTOML (builtins.readFile ../pyproject.toml)).project.version;
   distance = if revCount != null && releaseRevCount != null then lib.trivial.max 0 (revCount - releaseRevCount) else null;
   displayVersion = if distance != null && distance > 0 then "${version}+${toString distance}" else version;
 
@@ -72,6 +74,17 @@ let
         runHook preBuild
 
         mkdir -p apps/desktop/build
+
+        # Electron reads app.getVersion() from this manifest. The source
+        # manifest deliberately does not own the Hermes release version, so
+        # stamp the canonical package version into the Nix-built copy.
+        node -e '
+          const fs = require("fs")
+          const file = "apps/desktop/package.json"
+          const pkg = JSON.parse(fs.readFileSync(file, "utf8"))
+          pkg.version = process.argv[1]
+          fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n")
+        ' '${version}'
 
         patchShebangs .
 
