@@ -880,6 +880,46 @@ app.post('/edit', async (req, res) => {
   }
 });
 
+// React to a message
+app.post('/react', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const { chatId, messageId, text, fromMe } = req.body;
+  if (!chatId || !messageId || text === undefined) {
+    return res.status(400).json({ error: 'chatId, messageId, and text are required' });
+  }
+
+  try {
+    const key = { id: messageId, fromMe: fromMe ?? false, remoteJid: chatId };
+    await sendWithTimeout(chatId, { react: { text, key } });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a message (revoke)
+app.post('/delete', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const { chatId, messageId } = req.body;
+  if (!chatId || !messageId) {
+    return res.status(400).json({ error: 'chatId and messageId are required' });
+  }
+
+  try {
+    const key = { id: messageId, fromMe: true, remoteJid: chatId };
+    await sendWithTimeout(chatId, { delete: key });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Send media (image, video, document) natively
 app.post('/send-media', async (req, res) => {
   if (!sock || connectionState !== 'connected') {

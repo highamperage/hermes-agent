@@ -119,3 +119,28 @@ async def test_whatsapp_reply_context_is_structured_not_prerendered():
     assert event.reply_to_message_id == "quoted-123"
     assert event.reply_to_text == "the gateway should not inject reply context twice"
     assert not event.text.startswith("[Replying to:")
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_processing_start_and_complete_reactions():
+    adapter = _make_adapter()
+    resp = MagicMock(status=200)
+    resp.json = AsyncMock(return_value={"success": True, "messageId": "status-msg-1"})
+    adapter._http_session.post = MagicMock(return_value=_AsyncCM(resp))
+
+    event = MagicMock()
+    event.source.chat_id = "15551234567@s.whatsapp.net"
+    event.message_id = "user-msg-123"
+
+    # 1. Test processing start (should send 👀 reaction and ⏳ status message)
+    await adapter.on_processing_start(event)
+    
+    # Verify post calls were made
+    assert adapter._http_session.post.call_count >= 2
+
+    # 2. Test processing complete with success (should send ✅ reaction and delete status message)
+    from gateway.platforms.base import ProcessingOutcome
+    await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+    
+    assert adapter._http_session.post.call_count >= 4
+
