@@ -431,24 +431,42 @@ class WhatsAppBehaviorMixin:
         result = re.sub(r"~~(.+?)~~", r"~\1~", result)
         # _text_ is already WhatsApp italic — leave as-is
 
-        # --- 4. Convert markdown headers to bold text ---
-        # # Header → *Header*. Strip any *...* wrapping already produced
-        # by step 3 (e.g. "# **Title**" → "*Title*", not "**Title**",
-        # which WhatsApp renders with literal asterisks).
-        def _header_to_bold(m: re.Match) -> str:
+        # --- 4. Drop markdown headers completely ---
+        # Strip any *...* wrapping or _..._ wrapping on headers
+        def _header_drop(m: re.Match) -> str:
             inner = m.group(1).strip()
-            while len(inner) > 1 and inner.startswith("*") and inner.endswith("*"):
+            while len(inner) > 1 and (
+                (inner.startswith("*") and inner.endswith("*")) or
+                (inner.startswith("_") and inner.endswith("_"))
+            ):
                 inner = inner[1:-1].strip()
-            return f"*{inner}*"
+            return inner
 
         result = re.sub(
-            r"^#{1,6}\s+(.+)$", _header_to_bold, result, flags=re.MULTILINE
+            r"^#{1,6}\s+(.+)$", _header_drop, result, flags=re.MULTILINE
         )
 
-        # --- 5. Convert markdown links: [text](url) → text (url) ---
+        # --- 5. Normalize lists to single-level '-' bullets with blank lines between ---
+        new_lines = []
+        in_list = False
+        for line in result.splitlines():
+            m = re.match(r"^\s*([-*+]|\d+\.)\s+(.*)$", line)
+            if m:
+                if in_list and new_lines and new_lines[-1].strip() != "":
+                    new_lines.append("")
+                bullet_content = m.group(2).strip()
+                new_lines.append(f"- {bullet_content}")
+                in_list = True
+            else:
+                new_lines.append(line)
+                if line.strip() != "":
+                    in_list = False
+        result = "\n".join(new_lines)
+
+        # --- 6. Convert markdown links: [text](url) → text (url) ---
         result = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", result)
 
-        # --- 6. Restore protected sections ---
+        # --- 7. Restore protected sections ---
         for i, fence in enumerate(fences):
             result = result.replace(f"{_FENCE_PH}{i}\x00", fence)
         for i, code in enumerate(codes):
@@ -472,6 +490,11 @@ def resolve_whatsapp_bridge_dir() -> Path:
     """
     import shutil
     from pathlib import Path as _Path
+
+    # Explicit override for local development clone / editable install
+    clone_bridge = _Path("/home/hermes/.hermes/hermes-agent/scripts/whatsapp-bridge")
+    if clone_bridge.exists():
+        return clone_bridge
 
     # Default location in install tree (may be read-only)
     from hermes_constants import get_hermes_home

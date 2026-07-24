@@ -96,18 +96,17 @@ class TestFormatMessage:
         adapter = _make_adapter()
         assert adapter.format_message("~~deleted~~") == "~deleted~"
 
-    def test_headers_converted_to_bold(self):
+    def test_headers_dropped(self):
         adapter = _make_adapter()
-        assert adapter.format_message("# Title") == "*Title*"
-        assert adapter.format_message("## Subtitle") == "*Subtitle*"
-        assert adapter.format_message("### Deep") == "*Deep*"
+        assert adapter.format_message("# Title") == "Title"
+        assert adapter.format_message("## Subtitle") == "Subtitle"
+        assert adapter.format_message("### Deep") == "Deep"
 
-    def test_bold_header_does_not_double_wrap(self):
-        """"# **Title**" must become *Title*, not **Title** (WhatsApp would
-        render the doubled asterisks literally)."""
+    def test_bold_header_does_not_wrap(self):
+        """"# **Title**" must become Title (WhatsApp drops header symbols)."""
         adapter = _make_adapter()
-        assert adapter.format_message("# **Title**") == "*Title*"
-        assert adapter.format_message("## __Strong__") == "*Strong*"
+        assert adapter.format_message("# **Title**") == "Title"
+        assert adapter.format_message("## __Strong__") == "Strong"
 
     def test_links_converted(self):
         adapter = _make_adapter()
@@ -151,10 +150,17 @@ class TestFormatMessage:
         adapter = _make_adapter()
         content = "# Header\n\n**Bold text** and ~~strike~~\n\n```\ncode\n```"
         result = adapter.format_message(content)
-        assert "*Header*" in result
+        assert "Header" in result
         assert "*Bold text*" in result
         assert "~strike~" in result
         assert "```\ncode\n```" in result
+
+    def test_list_normalization(self):
+        adapter = _make_adapter()
+        content = "Intro:\n* bullet 1\n  - bullet 2\n1. bullet 3\n\nOutro."
+        result = adapter.format_message(content)
+        expected = "Intro:\n- bullet 1\n\n- bullet 2\n\n- bullet 3\n\nOutro."
+        assert result == expected
 
 
 # ---------------------------------------------------------------------------

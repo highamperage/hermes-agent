@@ -412,6 +412,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         self._group_allow_from = self._coerce_allow_list(config.extra.get("group_allow_from") or config.extra.get("groupAllowFrom"))
         self._mention_patterns = self._compile_mention_patterns()
         self._message_queue: asyncio.Queue = asyncio.Queue()
+        self._whatsapp_status_messages: dict[str, str] = {}
         self._bridge_log_fh = None
         self._bridge_log: Optional[Path] = None
         self._poll_task: Optional[asyncio.Task] = None
@@ -931,6 +932,113 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     return SendResult(success=False, error=error)
         except Exception as e:
             return SendResult(success=False, error=str(e))
+
+    async def react_to_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        *,
+        from_me: bool = False,
+    ) -> SendResult:
+        """Send a reaction to a WhatsApp message."""
+        if not self._running or not self._http_session:
+            return SendResult(success=False, error="Not connected")
+        bridge_exit = await self._check_managed_bridge_exit()
+        if bridge_exit:
+            return SendResult(success=False, error=bridge_exit)
+        try:
+            import aiohttp
+            async with self._http_session.post(
+                f"http://127.0.0.1:{self._bridge_port}/react",
+                json={
+                    "chatId": to_whatsapp_jid(chat_id),
+                    "messageId": message_id,
+                    "text": text,
+                    "fromMe": from_me,
+                },
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 200:
+                    return SendResult(success=True, message_id=message_id)
+                else:
+                    error = await resp.text()
+                    return SendResult(success=False, error=error)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
+    async def delete_message(
+        self,
+        chat_id: str,
+        message_id: str,
+    ) -> bool:
+        """Delete/revoke a previously sent message."""
+        if not self._running or not self._http_session:
+            return False
+        bridge_exit = await self._check_managed_bridge_exit()
+        if bridge_exit:
+            return False
+        try:
+            import aiohttp
+            async with self._http_session.post(
+                f"http://127.0.0.1:{self._bridge_port}/delete",
+                json={
+                    "chatId": to_whatsapp_jid(chat_id),
+                    "messageId": message_id,
+                },
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        """React with 👀 when processing begins and send an initial status bubble."""
+        if not event or not event.source or not event.source.chat_id:
+            return
+        chat_id = event.source.chat_id
+        
+        # 1. React with 👀 on inbound message if message_id exists
+        if event.message_id:
+            try:
+                await self.react_to_message(chat_id, event.message_id, "👀")
+            except Exception:
+                pass
+
+        # 2. Send initial status bubble (edit-in-place progress)
+        try:
+            res = await self.send(chat_id, "⏳ Working...")
+            if res.success and res.message_id:
+                if not hasattr(self, "_whatsapp_status_messages"):
+                    self._whatsapp_status_messages = {}
+                self._whatsapp_status_messages[chat_id] = res.message_id
+        except Exception:
+            pass
+
+    async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
+        """Swap reaction for ✅ or ❌ and clean up/delete the status bubble."""
+        if not event or not event.source or not event.source.chat_id:
+            return
+        chat_id = event.source.chat_id
+
+        # 1. Update reaction
+        if event.message_id:
+            try:
+                from gateway.platforms.base import ProcessingOutcome
+                if outcome == ProcessingOutcome.SUCCESS:
+                    await self.react_to_message(chat_id, event.message_id, "✅")
+                elif outcome == ProcessingOutcome.FAILURE:
+                    await self.react_to_message(chat_id, event.message_id, "❌")
+            except Exception:
+                pass
+
+        # 2. Clean up status bubble (delete or final edit)
+        try:
+            if hasattr(self, "_whatsapp_status_messages") and chat_id in self._whatsapp_status_messages:
+                status_msg_id = self._whatsapp_status_messages.pop(chat_id)
+                await self.delete_message(chat_id, status_msg_id)
+        except Exception:
+            pass
 
     async def _send_media_to_bridge(
         self,
