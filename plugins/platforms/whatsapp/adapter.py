@@ -145,7 +145,9 @@ def _bridge_pid_is_ours(pid: int, session_path: Path, expected_start) -> bool:
     cmdline = _read_process_cmdline(pid)
     if not cmdline:
         return False
-    return ("node" in cmdline) and (str(session_path) in cmdline)
+    session_str = str(session_path)
+    session_resolved_str = str(Path(session_path).resolve())
+    return ("node" in cmdline) and (session_str in cmdline or session_resolved_str in cmdline)
 
 
 def _kill_stale_bridge_by_pidfile(session_path: Path) -> None:
@@ -997,7 +999,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         if not event or not event.source or not event.source.chat_id:
             return
         chat_id = event.source.chat_id
-        
+
         # 1. React with 👀 on inbound message if message_id exists
         if event.message_id:
             try:
@@ -1229,17 +1231,38 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Download image URL to cache, send natively via bridge.
+        """Download image URL to cache or resolve local path, send natively via bridge.
 
-        ``metadata`` is accepted to honor the base-class contract — the
-        batch sender ``send_multiple_images`` passes it through to every
-        send path. The bridge media call doesn't use it, matching the
-        sibling overrides (send_video / send_voice / send_document).
+        If native bridge delivery fails or caching fails, fall back to safe text delivery.
         """
         try:
-            local_path = await cache_image_from_url(image_url)
-            return await self._send_media_to_bridge(chat_id, local_path, "image", caption)
-        except Exception:
+            if image_url.startswith("file://"):
+                from urllib.parse import unquote as _unquote
+                local_path = _unquote(image_url[7:])
+                res = await self._send_media_to_bridge(chat_id, local_path, "image", caption)
+                if res.success:
+                    return res
+            elif os.path.isabs(image_url):
+                res = await self._send_media_to_bridge(chat_id, image_url, "image", caption)
+                if res.success:
+                    return res
+            else:
+                local_path = await cache_image_from_url(image_url)
+                res = await self._send_media_to_bridge(chat_id, local_path, "image", caption)
+                if res.success:
+                    return res
+            logger.warning(
+                "[%s] Native WhatsApp image send failed; falling back to text: %s",
+                self.name,
+                image_url,
+            )
+            return await super().send_image(chat_id, image_url, caption, reply_to, metadata)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Error sending image natively (%s); falling back to text",
+                self.name,
+                exc,
+            )
             return await super().send_image(chat_id, image_url, caption, reply_to, metadata)
 
     async def send_image_file(
@@ -1250,8 +1273,27 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs,
     ) -> SendResult:
-        """Send a local image file natively via bridge."""
-        return await self._send_media_to_bridge(chat_id, image_path, "image", caption)
+        """Send a local image file natively via bridge.
+
+        If native delivery fails, fall back safely to text delivery via super().send_image_file().
+        """
+        try:
+            res = await self._send_media_to_bridge(chat_id, image_path, "image", caption)
+            if res.success:
+                return res
+            logger.warning(
+                "[%s] Native WhatsApp local image send failed (%s); falling back to safe text",
+                self.name,
+                res.error,
+            )
+            return await super().send_image_file(chat_id, image_path, caption, reply_to, **kwargs)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Error sending local image file (%s); falling back to safe text",
+                self.name,
+                exc,
+            )
+            return await super().send_image_file(chat_id, image_path, caption, reply_to, **kwargs)
 
     async def send_video(
         self,
@@ -1262,7 +1304,10 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         """Send a video natively via bridge — plays inline in WhatsApp."""
-        return await self._send_media_to_bridge(chat_id, video_path, "video", caption)
+        res = await self._send_media_to_bridge(chat_id, video_path, "video", caption)
+        if res.success:
+            return res
+        return await super().send_video(chat_id, video_path, caption, reply_to, **kwargs)
 
     async def send_voice(
         self,
@@ -1273,7 +1318,10 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         """Send an audio file as a WhatsApp voice message via bridge."""
-        return await self._send_media_to_bridge(chat_id, audio_path, "audio", caption)
+        res = await self._send_media_to_bridge(chat_id, audio_path, "audio", caption)
+        if res.success:
+            return res
+        return await super().send_voice(chat_id, audio_path, caption, reply_to, **kwargs)
 
     async def send_document(
         self,
@@ -1285,10 +1333,13 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         """Send a document/file as a downloadable attachment via bridge."""
-        return await self._send_media_to_bridge(
+        res = await self._send_media_to_bridge(
             chat_id, file_path, "document", caption,
             file_name or os.path.basename(file_path),
         )
+        if res.success:
+            return res
+        return await super().send_document(chat_id, file_path, caption, file_name, reply_to, **kwargs)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Send typing indicator via bridge."""

@@ -491,11 +491,6 @@ def resolve_whatsapp_bridge_dir() -> Path:
     import shutil
     from pathlib import Path as _Path
 
-    # Explicit override for local development clone / editable install
-    clone_bridge = _Path("/home/hermes/.hermes/hermes-agent/scripts/whatsapp-bridge")
-    if clone_bridge.exists():
-        return clone_bridge
-
     # Default location in install tree (may be read-only)
     from hermes_constants import get_hermes_home
     install_bridge = _Path(__file__).resolve().parents[2] / "scripts" / "whatsapp-bridge"

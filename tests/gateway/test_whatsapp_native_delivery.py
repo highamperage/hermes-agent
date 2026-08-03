@@ -134,13 +134,94 @@ async def test_whatsapp_processing_start_and_complete_reactions():
 
     # 1. Test processing start (should send 👀 reaction and ⏳ status message)
     await adapter.on_processing_start(event)
-    
+
     # Verify post calls were made
     assert adapter._http_session.post.call_count >= 2
 
     # 2. Test processing complete with success (should send ✅ reaction and delete status message)
     from gateway.platforms.base import ProcessingOutcome
     await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
-    
+
     assert adapter._http_session.post.call_count >= 4
 
+
+@pytest.mark.asyncio
+async def test_send_image_file_delivers_natively_with_caption(tmp_path):
+    adapter = _make_adapter()
+    img_file = tmp_path / "chart.png"
+    img_file.write_bytes(b"\x89PNG\r\n\x1a\nfake_image_data")
+
+    resp = MagicMock(status=200)
+    resp.json = AsyncMock(return_value={"success": True, "messageId": "img-msg-1"})
+    adapter._http_session.post = MagicMock(return_value=_AsyncCM(resp))
+
+    res = await adapter.send_image_file(
+        "15551234567",
+        str(img_file),
+        caption="Monthly Chart",
+    )
+
+    assert res.success
+    assert res.message_id == "img-msg-1"
+    call = adapter._http_session.post.call_args
+    assert call.args[0] == "http://127.0.0.1:3000/send-media"
+    assert call.kwargs["json"] == {
+        "chatId": "15551234567@s.whatsapp.net",
+        "filePath": str(img_file),
+        "mediaType": "image",
+        "caption": "Monthly Chart",
+    }
+
+
+@pytest.mark.asyncio
+async def test_send_image_file_fallback_on_failure(tmp_path):
+    adapter = _make_adapter()
+    img_file = tmp_path / "chart.png"
+    img_file.write_bytes(b"fake")
+
+    fail_resp = MagicMock(status=500)
+    fail_resp.text = AsyncMock(return_value="Bridge internal error")
+    ok_resp = MagicMock(status=200)
+    ok_resp.json = AsyncMock(return_value={"success": True, "messageId": "text-fallback-1"})
+
+    adapter._http_session.post = MagicMock(side_effect=[_AsyncCM(fail_resp), _AsyncCM(ok_resp)])
+
+    res = await adapter.send_image_file(
+        "15551234567",
+        str(img_file),
+        caption="Failed Image",
+    )
+
+    # Bridge failed (500), should fall back safely to text send
+    assert res.success
+    assert res.message_id == "text-fallback-1"
+    calls = adapter._http_session.post.call_args_list
+    assert len(calls) == 2
+    assert calls[0].args[0] == "http://127.0.0.1:3000/send-media"
+    assert calls[1].args[0] == "http://127.0.0.1:3000/send"
+    assert "Couldn't deliver the image attachment" in calls[1].kwargs["json"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_send_image_local_uri_delivers_natively(tmp_path):
+    adapter = _make_adapter()
+    img_file = tmp_path / "photo.jpg"
+    img_file.write_bytes(b"fake_jpeg")
+
+    resp = MagicMock(status=200)
+    resp.json = AsyncMock(return_value={"success": True, "messageId": "uri-img-1"})
+    adapter._http_session.post = MagicMock(return_value=_AsyncCM(resp))
+
+    file_uri = f"file://{img_file}"
+    res = await adapter.send_image(
+        "15551234567",
+        file_uri,
+        caption="Local Photo",
+    )
+
+    assert res.success
+    assert res.message_id == "uri-img-1"
+    call = adapter._http_session.post.call_args
+    assert call.args[0] == "http://127.0.0.1:3000/send-media"
+    assert call.kwargs["json"]["filePath"] == str(img_file)
+    assert call.kwargs["json"]["mediaType"] == "image"

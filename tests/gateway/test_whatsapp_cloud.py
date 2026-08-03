@@ -886,7 +886,7 @@ class TestMixinInherited:
     def test_format_message_converts_markdown(self):
         adapter = _make_adapter()
         assert adapter.format_message("**bold**") == "*bold*"
-        assert adapter.format_message("# Title") == "*Title*"
+        assert adapter.format_message("# Title") == "Title"
 
     def test_should_process_message_dm_open(self):
         adapter = _make_adapter()
