@@ -1000,12 +1000,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             return
         chat_id = event.source.chat_id
 
-        # 1. React with 👀 on inbound message if message_id exists
-        if event.message_id:
-            try:
-                await self.react_to_message(chat_id, event.message_id, "👀")
-            except Exception:
-                pass
+        # 1. Read-receipt reactions disabled per user preference.
+        # (Previously reacted with 👀 on inbound message_id here.)
 
         # 2. Send initial status bubble (edit-in-place progress)
         try:
@@ -1023,22 +1019,13 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             return
         chat_id = event.source.chat_id
 
-        # 1. Update reaction
-        if event.message_id:
-            try:
-                from gateway.platforms.base import ProcessingOutcome
-                if outcome == ProcessingOutcome.SUCCESS:
-                    await self.react_to_message(chat_id, event.message_id, "✅")
-                elif outcome == ProcessingOutcome.FAILURE:
-                    await self.react_to_message(chat_id, event.message_id, "❌")
-            except Exception:
-                pass
+        # 1. Reaction updates (✅/❌) disabled per user preference.
 
-        # 2. Clean up status bubble (delete or final edit)
+        # 2. Status bubble cleanup: pop the mapping but do NOT delete the
+        # message on WhatsApp (user preference: never delete messages).
         try:
             if hasattr(self, "_whatsapp_status_messages") and chat_id in self._whatsapp_status_messages:
-                status_msg_id = self._whatsapp_status_messages.pop(chat_id)
-                await self.delete_message(chat_id, status_msg_id)
+                self._whatsapp_status_messages.pop(chat_id)
         except Exception:
             pass
 
