@@ -930,6 +930,13 @@ class GatewayConfig:
     # disables sd_notify at runtime.
     systemd_watchdog_seconds: int = 0
 
+    # In-process event-loop liveness watchdog (#69089). A daemon OS thread
+    # probes the gateway loop with call_soon_threadsafe; after consecutive
+    # missed probes it dumps all-thread stacks and hard-exits with the
+    # service-restart code so the supervisor can revive the process. On by
+    # default; set gateway.loop_watchdog: false in config.yaml to disable.
+    loop_watchdog: bool = True
+
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
 
@@ -1064,6 +1071,7 @@ class GatewayConfig:
             "max_concurrent_sessions": self.max_concurrent_sessions,
             "multiplex_profiles": self.multiplex_profiles,
             "systemd_watchdog_seconds": self.systemd_watchdog_seconds,
+            "loop_watchdog": self.loop_watchdog,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
@@ -1135,6 +1143,11 @@ class GatewayConfig:
         systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
             systemd_watchdog_raw, systemd_watchdog_key
         )
+        if "loop_watchdog" in data:
+            loop_watchdog_raw = data.get("loop_watchdog")
+        else:
+            loop_watchdog_raw = nested_gateway.get("loop_watchdog")
+        loop_watchdog = _coerce_bool(loop_watchdog_raw, True)
         if multiplex_profiles is None and isinstance(nested_gateway, dict):
             # Also honor gateway.multiplex_profiles written by
             # ``hermes config set gateway.multiplex_profiles true``.
@@ -1195,6 +1208,7 @@ class GatewayConfig:
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
             systemd_watchdog_seconds=systemd_watchdog_seconds,
+            loop_watchdog=loop_watchdog,
             max_concurrent_sessions=max_concurrent_sessions,
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
@@ -1536,6 +1550,8 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["cron_continuable_surface"] = platform_cfg["cron_continuable_surface"]
                 if "require_mention" in platform_cfg:
                     bridged["require_mention"] = platform_cfg["require_mention"]
+                if "send_read_receipts" in platform_cfg:
+                    bridged["send_read_receipts"] = platform_cfg["send_read_receipts"]
                 if plat == Platform.TELEGRAM and "allowed_chats" in platform_cfg:
                     bridged["allowed_chats"] = platform_cfg["allowed_chats"]
                 if plat == Platform.TELEGRAM and "group_allowed_chats" in platform_cfg:
@@ -2112,7 +2128,6 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # API Server
-    api_server_enabled = is_truthy_value(getenv("API_SERVER_ENABLED", ""))
     api_server_key = getenv("API_SERVER_KEY", "")
     api_server_cors_origins = getenv("API_SERVER_CORS_ORIGINS", "")
     api_server_port = getenv("API_SERVER_PORT")
@@ -2307,7 +2322,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             "agent_id": getenv("WECOM_CALLBACK_AGENT_ID", ""),
             "token": getenv("WECOM_CALLBACK_TOKEN", ""),
             "encoding_aes_key": getenv("WECOM_CALLBACK_ENCODING_AES_KEY", ""),
-            "host": getenv("WECOM_CALLBACK_HOST", "0.0.0.0"),
+            # No default here: an unset WECOM_CALLBACK_HOST leaves extra.host
+            # falsy so the adapter's dual-stack DEFAULT_HOST=None applies
+            # (binds IPv4 + IPv6; "0.0.0.0" was IPv4-only, NS-603).
+            "host": getenv("WECOM_CALLBACK_HOST", ""),
             "port": getenv_int("WECOM_CALLBACK_PORT", 8645),
         })
 

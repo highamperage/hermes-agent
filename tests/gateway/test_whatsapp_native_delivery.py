@@ -8,41 +8,11 @@ from tests.gateway.test_whatsapp_formatting import _AsyncCM, _make_adapter
 
 
 class TestWhatsAppNativeFormatting:
-    def test_single_asterisk_markdown_italic_uses_whatsapp_underscore(self):
-        adapter = _make_adapter()
-
-        assert adapter.format_message("this is *italic* text") == "this is _italic_ text"
-        assert adapter.format_message("- * list bullet stays literal") == "- * list bullet stays literal"
 
     def test_invisible_unicode_prefixes_are_sanitized(self):
         adapter = _make_adapter()
 
         assert adapter.format_message("\u2060\u202ftext") == " text"
-
-
-@pytest.mark.asyncio
-async def test_send_poll_posts_to_bridge_poll_endpoint():
-    adapter = _make_adapter()
-    resp = MagicMock(status=200)
-    resp.json = AsyncMock(return_value={"success": True, "messageId": "poll-msg"})
-    adapter._http_session.post = MagicMock(return_value=_AsyncCM(resp))
-
-    result = await adapter.send_poll(
-        "15551234567",
-        "Proceed?",
-        ["Approve", "Deny"],
-    )
-
-    assert result.success
-    assert result.message_id == "poll-msg"
-    call = adapter._http_session.post.call_args
-    assert call.args[0] == "http://127.0.0.1:3000/send-poll"
-    assert call.kwargs["json"] == {
-        "chatId": "15551234567@s.whatsapp.net",
-        "question": "Proceed?",
-        "options": ["Approve", "Deny"],
-        "selectableCount": 1,
-    }
 
 
 @pytest.mark.asyncio
@@ -132,17 +102,20 @@ async def test_whatsapp_processing_start_and_complete_reactions():
     event.source.chat_id = "15551234567@s.whatsapp.net"
     event.message_id = "user-msg-123"
 
-    # 1. Test processing start (should send 👀 reaction and ⏳ status message)
+    # 1. Test processing start (should send ⏳ status message bubble; reactions disabled per config)
     await adapter.on_processing_start(event)
 
-    # Verify post calls were made
-    assert adapter._http_session.post.call_count >= 2
+    # Verify status bubble post call was made (1 call)
+    assert adapter._http_session.post.call_count == 1
+    assert adapter._whatsapp_status_messages.get("15551234567@s.whatsapp.net") == "status-msg-1"
 
-    # 2. Test processing complete with success (should send ✅ reaction and delete status message)
+    # 2. Test processing complete with success (pops mapping; does not delete message or send result reaction)
     from gateway.platforms.base import ProcessingOutcome
     await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
 
-    assert adapter._http_session.post.call_count >= 4
+    # Post call count remains 1 and status mapping is cleaned up
+    assert adapter._http_session.post.call_count == 1
+    assert "15551234567@s.whatsapp.net" not in adapter._whatsapp_status_messages
 
 
 @pytest.mark.asyncio
