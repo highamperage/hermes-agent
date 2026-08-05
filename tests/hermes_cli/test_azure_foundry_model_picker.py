@@ -284,3 +284,32 @@ def test_non_azure_provider_fetch_models_without_auth_mode_kwarg(monkeypatch):
         "api_key": "fake-secret-key",
         "base_url": "https://api.fake.com/v1",
     }
+
+
+def test_cached_provider_model_ids_filters_fresh_disk_cache_for_azure_foundry(monkeypatch, tmp_path):
+    """cached_provider_model_ids('azure-foundry') filters pre-fix disk cache entries containing many model IDs."""
+    import time
+    from hermes_cli.models import cached_provider_model_ids, _credential_fingerprint
+
+    cache_file = tmp_path / "provider_models_cache.json"
+    monkeypatch.setattr("hermes_cli.models._provider_models_cache_path", lambda: cache_file)
+
+    fp = _credential_fingerprint("azure-foundry")
+    pre_fix_cache = {
+        "azure-foundry": {
+            "fp": fp,
+            "at": time.time(),
+            "models": [
+                "gpt-4o",
+                "gpt-5.6-terra",
+                "text-embedding-3-small",
+                "gpt-5.6-luna",
+                "dall-e-3",
+                "gpt-3.5-turbo",
+            ],
+        }
+    }
+    cache_file.write_text(json.dumps(pre_fix_cache), encoding="utf-8")
+
+    result = cached_provider_model_ids("azure-foundry", force_refresh=False)
+    assert result == ["gpt-5.6-terra", "gpt-5.6-luna"]

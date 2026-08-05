@@ -3256,6 +3256,12 @@ def _save_provider_models_cache(data: dict) -> None:
         pass
 
 
+def _filter_azure_foundry_models(models: list[str]) -> list[str]:
+    """Filter model list for azure-foundry provider to allowlisted models only."""
+    allowlist = {"gpt-5.6-terra", "gpt-5.6-luna"}
+    return [m for m in models if m in allowlist]
+
+
 def cached_provider_model_ids(
     provider: Optional[str],
     *,
@@ -3271,6 +3277,11 @@ def cached_provider_model_ids(
     if not normalized:
         return []
 
+    def _finalize(models: list[str]) -> list[str]:
+        if normalized == "azure-foundry":
+            return _filter_azure_foundry_models(models)
+        return models
+
     cache = _load_provider_models_cache()
     fp = _credential_fingerprint(normalized)
     entry = cache.get(normalized)
@@ -3285,13 +3296,13 @@ def cached_provider_model_ids(
     ):
         age = now - float(entry.get("at", 0))
         if age < ttl_seconds:
-            return list(entry["models"])
+            return _finalize(list(entry["models"]))
         if age < _PROVIDER_MODELS_STALE_SERVE_MAX:
             # Stale-while-revalidate: serve the expired entry immediately so
             # interactive picker opens never block on serial /v1/models
             # round-trips; refresh the cache off-thread for the next open.
             _spawn_swr_refresh(normalized)
-            return list(entry["models"])
+            return _finalize(list(entry["models"]))
 
     # Cache miss / stale / forced refresh — call the live path.
     live = provider_model_ids(normalized, force_refresh=force_refresh)
@@ -3302,7 +3313,7 @@ def cached_provider_model_ids(
             "models": list(live),
         }
         _save_provider_models_cache(cache)
-        return list(live)
+        return _finalize(list(live))
 
     # Live fetch returned nothing. If we have a stale entry with the
     # SAME fingerprint, prefer it over an empty result — stale data
@@ -3313,8 +3324,8 @@ def cached_provider_model_ids(
         and isinstance(entry.get("models"), list)
         and entry["models"]
     ):
-        return list(entry["models"])
-    return list(live or [])
+        return _finalize(list(entry["models"]))
+    return _finalize(list(live or []))
 
 
 def clear_provider_models_cache(provider: Optional[str] = None) -> None:
