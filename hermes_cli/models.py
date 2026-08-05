@@ -3007,17 +3007,22 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         from hermes_cli.auth import resolve_api_key_provider_credentials
 
         _p = get_provider_profile(normalized)
-        if _p and _p.auth_type == "api_key" and _p.base_url:
+        if _p and _p.auth_type == "api_key":
+            auth_mode = "api_key"
             try:
                 creds = resolve_api_key_provider_credentials(normalized)
                 api_key = str(creds.get("api_key") or "").strip()
                 base_url = str(creds.get("base_url") or "").strip()
+                auth_mode = str(creds.get("auth_mode") or "api_key").strip()
             except Exception:
                 api_key, base_url = "", _p.base_url
             if not base_url:
                 base_url = _p.base_url
-            if api_key:
-                live = _p.fetch_models(api_key=api_key, base_url=base_url or None)
+            if api_key or normalized == "azure-foundry":
+                if normalized == "azure-foundry":
+                    live = _p.fetch_models(api_key=api_key, base_url=base_url or None, auth_mode=auth_mode)
+                else:
+                    live = _p.fetch_models(api_key=api_key, base_url=base_url or None)
                 if live:
                     # Merge static curated list with live API results so
                     # models that the live endpoint omits (stale cache,

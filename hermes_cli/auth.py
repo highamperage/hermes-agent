@@ -7113,9 +7113,46 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
         api_key = LMSTUDIO_NOAUTH_PLACEHOLDER
         key_source = key_source or "default"
 
+    auth_mode = "api_key"
     env_url = ""
     if pconfig.base_url_env_var:
         env_url = os.getenv(pconfig.base_url_env_var, "").strip()
+
+    if provider_id == "azure-foundry":
+        try:
+            from hermes_cli.config import get_env_value_prefer_dotenv, load_config
+            if not env_url:
+                env_url = (get_env_value_prefer_dotenv("AZURE_FOUNDRY_BASE_URL") or "").strip()
+            if not api_key:
+                api_key = (get_env_value_prefer_dotenv("AZURE_FOUNDRY_API_KEY") or "").strip()
+
+            cfg = load_config()
+            model_cfg = cfg.get("model") if isinstance(cfg, dict) else None
+            cfg_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
+
+            if cfg_provider == "azure-foundry":
+                if not env_url:
+                    env_url = str(model_cfg.get("base_url") or "").strip()
+                cfg_auth_mode = str(model_cfg.get("auth_mode") or "").strip().lower()
+                if cfg_auth_mode:
+                    auth_mode = cfg_auth_mode
+
+                if auth_mode in ("entra_id", "entra"):
+                    api_key = ""
+                    try:
+                        from agent.azure_identity_adapter import build_token_provider, EntraIdentityConfig
+                        entra_cfg = EntraIdentityConfig.from_dict(
+                            model_cfg.get("entra") if isinstance(model_cfg.get("entra"), dict) else None
+                        )
+                        token_provider = build_token_provider(config=entra_cfg)
+                        api_key = token_provider()
+                    except Exception:
+                        api_key = ""
+                else:
+                    if not api_key:
+                        api_key = str(model_cfg.get("api_key") or "").strip()
+        except Exception:
+            pass
 
     if provider_id in {"kimi-coding", "kimi-coding-cn"}:
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
@@ -7155,12 +7192,15 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     if not (isinstance(base_url, str) and base_url.strip()):
         base_url = pconfig.inference_base_url
 
-    return {
+    res = {
         "provider": provider_id,
         "api_key": api_key,
         "base_url": base_url.rstrip("/"),
         "source": key_source or "default",
     }
+    if provider_id == "azure-foundry":
+        res["auth_mode"] = auth_mode
+    return res
 
 
 def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str, Any]:
