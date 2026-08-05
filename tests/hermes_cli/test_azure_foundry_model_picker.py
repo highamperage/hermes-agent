@@ -179,8 +179,35 @@ def test_azure_foundry_entra_mode_failure_clears_api_key(monkeypatch):
         assert creds.get("api_key") != "sk-lingering-static-key"
 
 
-def test_azure_foundry_provider_model_ids_returns_discovered_deployments(monkeypatch):
-    """provider_model_ids('azure-foundry') returns all deployments from the configured base_url."""
+def test_azure_foundry_allowlist_filtering_filters_many_ids_and_handles_missing(monkeypatch):
+    """Azure Foundry live fetch returns ONLY gpt-5.6-terra and gpt-5.6-luna in live order, filtering un-allowlisted model IDs."""
+    monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "sk-azure-key")
+    monkeypatch.setenv("AZURE_FOUNDRY_BASE_URL", "https://test-resource.openai.azure.com/openai/v1")
+
+    profile = get_provider_profile("azure-foundry")
+    assert profile is not None
+
+    # Case 1: Endpoint returns many model IDs (e.g. gpt-4o, embeddings, etc.) -> return only gpt-5.6-terra and gpt-5.6-luna in live order
+    with patch.object(
+        profile,
+        "fetch_models",
+        return_value=["gpt-4o", "gpt-5.6-terra", "text-embedding-3-small", "gpt-5.6-luna", "dall-e-3"],
+    ):
+        result = provider_model_ids("azure-foundry", force_refresh=True)
+        assert result == ["gpt-5.6-terra", "gpt-5.6-luna"]
+
+    # Case 2: Endpoint returns only one allowlisted ID (e.g. gpt-5.6-luna) -> return only gpt-5.6-luna
+    with patch.object(
+        profile,
+        "fetch_models",
+        return_value=["gpt-4o", "gpt-5.6-luna", "text-embedding-3-small"],
+    ):
+        result = provider_model_ids("azure-foundry", force_refresh=True)
+        assert result == ["gpt-5.6-luna"]
+
+
+def test_azure_foundry_provider_model_ids_filters_allowlisted_deployments(monkeypatch):
+    """provider_model_ids('azure-foundry') returns only allowlisted deployments (gpt-5.6-terra and gpt-5.6-luna) from a mixed live response."""
     monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "sk-azure-key")
     monkeypatch.setenv("AZURE_FOUNDRY_BASE_URL", "https://test-resource.openai.azure.com/openai/v1")
 
@@ -190,7 +217,7 @@ def test_azure_foundry_provider_model_ids_returns_discovered_deployments(monkeyp
     with patch.object(
         profile,
         "fetch_models",
-        return_value=["gpt-5.6-terra", "gpt-5.6-luna"],
+        return_value=["gpt-4o", "gpt-5.6-terra", "text-embedding-3-small", "gpt-5.6-luna", "dall-e-3"],
     ) as mock_fetch:
         result = provider_model_ids("azure-foundry", force_refresh=True)
         assert result == ["gpt-5.6-terra", "gpt-5.6-luna"]

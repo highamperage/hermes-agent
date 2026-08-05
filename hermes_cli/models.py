@@ -3055,6 +3055,9 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
                                 merged.append(m)
                                 merged_lower.add(_model_dedup_key(m))
                         return merged
+                    if normalized == "azure-foundry":
+                        allowlist = {"gpt-5.6-terra", "gpt-5.6-luna"}
+                        return [m for m in live if m in allowlist]
                     return live
             # Use profile's fallback_models if defined
             if _p.fallback_models:
