@@ -1268,6 +1268,13 @@ class CodeBlockProgressAdapter(ProgressCaptureAdapter):
     supports_code_blocks = True
 
 
+class WhatsAppProgressAdapter(ProgressCaptureAdapter):
+    """A WhatsApp progress adapter (supports_code_blocks=True, supports_terminal_code_blocks=False)."""
+
+    supports_code_blocks = True
+    supports_terminal_code_blocks = False
+
+
 class TerminalCommandAgent:
     """Emits a terminal tool.started with a real, multi-line command arg."""
 
@@ -1343,6 +1350,55 @@ async def test_terminal_progress_renders_fenced_code_block(monkeypatch, tmp_path
     assert "node --version" not in all_content
     # No truncated quoted preview for the terminal command.
     assert 'terminal: "' not in all_content
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_terminal_progress_renders_unfenced_full_command(monkeypatch, tmp_path):
+    """WhatsApp terminal progress shows complete command as normal text without fenced code blocks or truncation."""
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = TerminalCommandAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    import tools.terminal_tool  # noqa: F401 - register terminal emoji
+
+    adapter = WhatsAppProgressAdapter(platform=Platform.WHATSAPP)
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        chat_id="12345@s.whatsapp.net",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-whatsapp-terminal-progress",
+        session_key="agent:main:whatsapp:dm:12345@s.whatsapp.net",
+    )
+
+    assert result["final_response"] == "done"
+    all_content = " ".join(call["content"] for call in adapter.sent)
+    all_content += " ".join(call["content"] for call in adapter.edits)
+    # No fenced code block
+    assert "```" not in all_content
+    # No ellipsis truncation
+    assert "..." not in all_content
+    # Complete multi-line command rendered as normal text
+    assert "set -euo pipefail" in all_content
+    assert "printf 'node: '; node --version" in all_content
+    assert "npm install -g hyperframes@latest" in all_content
 
 
 @pytest.mark.asyncio

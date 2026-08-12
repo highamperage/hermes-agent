@@ -2647,6 +2647,13 @@ class BasePlatformAdapter(ABC):
     # preview (see gateway/run.py progress_callback).
     supports_code_blocks: bool = False
 
+    # Whether terminal command progress previews use fenced code blocks.
+    # Default True when ``supports_code_blocks`` is True. Platforms such as
+    # WhatsApp (where monospace fenced code blocks appear oversized) override
+    # this to False so terminal progress messages show the complete command
+    # as normal text without fences or ellipsis truncation.
+    supports_terminal_code_blocks: bool = True
+
     # Whether this adapter's typing indicator renders TEXT (a status line
     # next to the bot name) rather than a native textless bubble. When True,
     # the gateway feeds live per-tool status phrases via set_status_text()

@@ -73,6 +73,7 @@ class WhatsAppBehaviorMixin:
     # WhatsApp allows ~65K but long messages are unreadable on mobile.
     MAX_MESSAGE_LENGTH: int = 4096
     supports_code_blocks = True  # WhatsApp renders fenced code blocks (monospace)
+    supports_terminal_code_blocks = False  # WhatsApp shows terminal commands as normal text without fences/truncation
 
     DEFAULT_REPLY_PREFIX: str = "⚕ *Hermes Agent*\n────────────\n"
 

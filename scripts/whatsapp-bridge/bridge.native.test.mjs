@@ -83,6 +83,19 @@ import {
   console.log('  ✓ unresolved replyTo falls back to plain text');
 }
 
+{
+  const store = createBoundedMessageStore(2);
+  const { content, options } = buildTextSendPayload('ephemeral text', {
+    chatId: '15551234567@s.whatsapp.net',
+    messageStore: store,
+    ephemeralExpiration: 604800,
+  });
+
+  assert.deepEqual(content, { text: 'ephemeral text' });
+  assert.equal(options.ephemeralExpiration, 604800);
+  console.log('  ✓ text payload includes ephemeralExpiration in options when provided');
+}
+
 // -- inbound quote/media/native metadata --------------------------------
 {
   const event = await extractBridgeEvent({

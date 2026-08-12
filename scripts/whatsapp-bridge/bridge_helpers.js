@@ -157,9 +157,12 @@ export function pollUpdateForAggregation({
   return null;
 }
 
-export function buildTextSendPayload(text, { replyTo, messageStore } = {}) {
+export function buildTextSendPayload(text, { replyTo, messageStore, ephemeralExpiration } = {}) {
   const content = { text };
   const options = {};
+  if (ephemeralExpiration) {
+    options.ephemeralExpiration = ephemeralExpiration;
+  }
   const quoted = messageStore?.get(replyTo);
   if (quoted?.key && quoted?.message) {
     // Baileys expects quoted messages as sendMessage options, not inside the

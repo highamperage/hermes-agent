@@ -702,6 +702,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 "WHATSAPP_GROUP_ALLOWED_USERS", "WHATSAPP_GROUP_ALLOW_FROM",
                 "WHATSAPP_REQUIRE_MENTION", "WHATSAPP_MENTION_PATTERNS",
                 "WHATSAPP_FREE_RESPONSE_CHATS",
+                "WHATSAPP_DISAPPEARING_MESSAGES", "WHATSAPP_EPHEMERAL_EXPIRATION",
+                "WHATSAPP_DISAPPEARING_MESSAGES_CHAT", "WHATSAPP_HOME_CHANNEL",
                 # Full set bridge.js consumes -- without these a secondary
                 # profile's bridge silently reverts to defaults for debug,
                 # forwarding, prefixes, and send pacing.
@@ -2010,6 +2012,9 @@ def _apply_yaml_config(yaml_cfg: dict, whatsapp_cfg: dict) -> dict | None:
         if isinstance(gaf, list):
             gaf = ",".join(str(v) for v in gaf)
         os.environ["WHATSAPP_GROUP_ALLOWED_USERS"] = str(gaf)
+    dm = whatsapp_cfg.get("disappearing_messages") or whatsapp_cfg.get("ephemeral_expiration")
+    if dm is not None and not os.getenv("WHATSAPP_DISAPPEARING_MESSAGES"):
+        os.environ["WHATSAPP_DISAPPEARING_MESSAGES"] = str(dm)
     return None
 
 

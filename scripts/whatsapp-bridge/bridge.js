@@ -19,7 +19,7 @@
  *   node bridge.js --port 3000 --session ~/.hermes/whatsapp/session
  */
 
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, getAggregateVotesInPollMessage, decryptPollVote, getKeyAuthor, jidNormalizedUser } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, getAggregateVotesInPollMessage, decryptPollVote, getKeyAuthor, jidNormalizedUser, WA_DEFAULT_EPHEMERAL } from '@whiskeysockets/baileys';
 import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -154,6 +154,71 @@ function sendWithTimeout(chatId, payload, options = {}, timeoutMs = SEND_TIMEOUT
     Promise.race([sock.sendMessage(chatId, payload, options), timeoutPromise])
       .finally(() => clearTimeout(timer))
   );
+}
+
+// --- Disappearing messages (7-day timer) handling ---
+const _appliedEphemeralChats = new Set();
+
+function getDisappearingMessagesTimer() {
+  const raw = process.env.WHATSAPP_DISAPPEARING_MESSAGES || process.env.WHATSAPP_EPHEMERAL_EXPIRATION;
+  if (!raw) return WA_DEFAULT_EPHEMERAL;
+  const val = String(raw).trim().toLowerCase();
+  if (['off', '0', 'false', 'disabled'].includes(val)) return 0;
+  const num = parseInt(val, 10);
+  return Number.isFinite(num) && num > 0 ? num : WA_DEFAULT_EPHEMERAL;
+}
+
+function isTargetEphemeralChat(chatId) {
+  if (!chatId) return false;
+  const timer = getDisappearingMessagesTimer();
+  if (!timer) return false;
+
+  const explicitTarget = process.env.WHATSAPP_DISAPPEARING_MESSAGES_CHAT || process.env.WHATSAPP_HOME_CHANNEL;
+  if (explicitTarget) {
+    if (explicitTarget === '*' || explicitTarget === chatId || normalizeWhatsAppId(chatId) === normalizeWhatsAppId(explicitTarget)) {
+      return true;
+    }
+  }
+
+  if (WHATSAPP_MODE === 'self-chat' && sock?.user) {
+    const myNumber = (sock.user.id || '').replace(/:.*@/, '@').replace(/@.*/, '');
+    const myLid = (sock.user.lid || '').replace(/:.*@/, '@').replace(/@.*/, '');
+    const chatNumber = chatId.replace(/@.*/, '');
+    if ((myNumber && chatNumber === myNumber) || (myLid && chatNumber === myLid)) {
+      return true;
+    }
+  }
+
+  if (WHATSAPP_MODE === 'bot') {
+    if (process.env.WHATSAPP_DISAPPEARING_MESSAGES_ALL === 'true') return true;
+    if (matchesAllowedUser(chatId, ALLOWED_USERS, SESSION_DIR)) return true;
+  }
+
+  return false;
+}
+
+function getEphemeralOptionsForChat(chatId) {
+  if (!isTargetEphemeralChat(chatId)) return {};
+  const timer = getDisappearingMessagesTimer();
+  return timer ? { ephemeralExpiration: timer } : {};
+}
+
+async function ensureEphemeralSettingForChat(chatId) {
+  if (!sock || connectionState !== 'connected') return;
+  if (!isTargetEphemeralChat(chatId)) return;
+  const key = normalizeWhatsAppId(chatId);
+  if (_appliedEphemeralChats.has(key)) return;
+
+  const timer = getDisappearingMessagesTimer();
+  if (!timer) return;
+
+  try {
+    console.log(`⏳ Applying ${timer}s disappearing-message timer for chat ${chatId}`);
+    await sendWithTimeout(chatId, { disappearingMessagesInChat: timer });
+    _appliedEphemeralChats.add(key);
+  } catch (err) {
+    console.warn(`⚠️ Failed to set disappearing-message timer for ${chatId}:`, err?.message || err);
+  }
 }
 
 function formatOutgoingMessage(message) {
@@ -458,6 +523,7 @@ async function startSocket() {
       }
     } else if (connection === 'open') {
       connectionState = 'connected';
+      _appliedEphemeralChats.clear();
       const connectedUser = sock?.user
         ? {
             id: sock.user.id || null,
@@ -831,6 +897,8 @@ app.post('/send', async (req, res) => {
   }
 
   try {
+    await ensureEphemeralSettingForChat(chatId);
+    const ephemeralExpiration = isTargetEphemeralChat(chatId) ? getDisappearingMessagesTimer() : undefined;
     const chunks = splitLongMessage(formatOutgoingMessage(message));
     const messageIds = [];
     for (let i = 0; i < chunks.length; i += 1) {
@@ -838,6 +906,7 @@ app.post('/send', async (req, res) => {
         chatId,
         replyTo: i === 0 ? replyTo : undefined,
         messageStore,
+        ephemeralExpiration,
       });
       const sent = await sendWithTimeout(chatId, payload, options);
       trackSentMessageId(sent);
@@ -870,14 +939,16 @@ app.post('/edit', async (req, res) => {
   }
 
   try {
+    await ensureEphemeralSettingForChat(chatId);
     const key = { id: messageId, fromMe: true, remoteJid: chatId };
     const chunks = splitLongMessage(formatOutgoingMessage(message));
     const messageIds = [];
+    const options = getEphemeralOptionsForChat(chatId);
 
-    await sendWithTimeout(chatId, { text: chunks[0], edit: key });
+    await sendWithTimeout(chatId, { text: chunks[0], edit: key }, options);
     if (chunks.length > 1) {
       for (let i = 1; i < chunks.length; i += 1) {
-        const sent = await sendWithTimeout(chatId, { text: chunks[i] });
+        const sent = await sendWithTimeout(chatId, { text: chunks[i] }, options);
         trackSentMessageId(sent);
         if (sent?.key?.id) messageIds.push(sent.key.id);
         if (i < chunks.length - 1) {
@@ -944,6 +1015,7 @@ app.post('/send-media', async (req, res) => {
   }
 
   try {
+    await ensureEphemeralSettingForChat(chatId);
     if (!existsSync(filePath)) {
       return res.status(404).json({ error: `File not found: ${filePath}` });
     }
@@ -1022,7 +1094,8 @@ app.post('/send-media', async (req, res) => {
         break;
     }
 
-    const sent = await sendWithTimeout(chatId, msgPayload);
+    const options = getEphemeralOptionsForChat(chatId);
+    const sent = await sendWithTimeout(chatId, msgPayload, options);
     trackSentMessageId(sent);
     messageStore.remember(sent);
     res.json({ success: true, messageId: sent?.key?.id });
@@ -1045,8 +1118,10 @@ app.post('/send-poll', async (req, res) => {
   }
 
   try {
+    await ensureEphemeralSettingForChat(chatId);
     const payload = buildPollPayload({ question, options, selectableCount });
-    const sent = await sendWithTimeout(chatId, payload);
+    const sendOpts = getEphemeralOptionsForChat(chatId);
+    const sent = await sendWithTimeout(chatId, payload, sendOpts);
     trackSentMessageId(sent);
     rememberSentMessage(sent, payload);
     res.json({ success: true, messageId: sent?.key?.id });
@@ -1067,8 +1142,10 @@ app.post('/send-location', async (req, res) => {
   }
 
   try {
+    await ensureEphemeralSettingForChat(chatId);
     const payload = buildLocationPayload({ latitude, longitude, name, address });
-    const sent = await sendWithTimeout(chatId, payload);
+    const sendOpts = getEphemeralOptionsForChat(chatId);
+    const sent = await sendWithTimeout(chatId, payload, sendOpts);
     trackSentMessageId(sent);
     messageStore.remember(sent);
     res.json({ success: true, messageId: sent?.key?.id });
