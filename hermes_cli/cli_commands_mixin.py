@@ -3574,6 +3574,7 @@ class CLICommandsMixin:
             print("  🟡 /update cancelled.")
             return False
 
+        task_token = str(uuid.uuid4())
         prompt = (
             "Execute self-contained update workflow in /home/hermes/.hermes/hermes-agent: "
             "1. Perform repository checks: cd /home/hermes/.hermes/hermes-agent, verify repository root (git rev-parse --show-toplevel), main branch, and remotes (origin is https://github.com/highamperage/hermes-agent.git and upstream is https://github.com/NousResearch/hermes-agent.git). "
@@ -3582,7 +3583,7 @@ class CLICommandsMixin:
             "4. Perform origin/main push and pull: git push origin main and git pull origin main. Unset COPILOT_GITHUB_TOKEN and GITHUB_TOKEN if set. "
             "5. Run the documented build command (e.g., cd ui-tui && npm run build). "
             "6. Explicit constraints: Do NOT run tests (no tests), do NOT reset (no reset), and do NOT force-push (no force-push). "
-            "7. Report final SHA (git rev-parse HEAD), git status, and build result, ending with an AGY DONE sentinel on its own line."
+            f"7. Report final SHA (git rev-parse HEAD), git status, and build result, ending with an AGY DONE {task_token} sentinel on its own line."
         )
 
         try:
@@ -3623,6 +3624,32 @@ class CLICommandsMixin:
         print()
         print("  ⚕ Dispatched update task to tmux session 'agy'. Exiting session...")
         print()
+
+        try:
+            # Safely capture the current controlling terminal path
+            tty_path = None
+            if sys.stdout.isatty():
+                try:
+                    tty_path = os.ttyname(sys.stdout.fileno())
+                except Exception:
+                    pass
+            if not tty_path and os.path.exists("/dev/tty"):
+                tty_path = "/dev/tty"
+
+            if tty_path:
+                watcher_script = os.path.join(os.path.dirname(__file__), "agy_watcher.py")
+                if os.path.exists(watcher_script):
+                    subprocess.Popen(
+                        [sys.executable, watcher_script, tty_path, task_token],
+                        start_new_session=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        stdin=subprocess.DEVNULL
+                    )
+        except Exception:
+            # Do not let watcher failures prevent the update dispatch
+            pass
+
         return True
 
     def _handle_voice_command(self, command: str):
