@@ -107,10 +107,11 @@ def test_session_missing_refuses_and_returns_false(capsys):
     assert "tmux session 'agy' not found" in out
     assert self_._pending_relaunch is None
     assert result is False
+    import subprocess
     mock_run.assert_called_once_with(
         ["tmux", "has-session", "-t", "agy"],
-        stdout=-1,
-        stderr=-1,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
 
@@ -131,6 +132,7 @@ def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, caps
     with (
         patch("hermes_cli.config.is_managed", return_value=False),
         patch("subprocess.run", mock_run),
+        patch("subprocess.Popen"),
     ):
         result = _call(self_)
 
@@ -151,10 +153,10 @@ def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, caps
     assert "upstream merge" in prompt_sent
     assert "origin/main push and pull" in prompt_sent
     assert "documented build" in prompt_sent
-    assert "no tests" in prompt_sent
+    assert "smoke test" in prompt_sent
     assert "no reset" in prompt_sent
     assert "no force-push" in prompt_sent
-    assert "stop on conflicts" in prompt_sent
+    assert "Stop on conflicts" in prompt_sent
     assert "AGY DONE" in prompt_sent
     assert calls[2][0][0] == ["tmux", "paste-buffer", "-t", "agy"]
     assert calls[3][0][0] == ["tmux", "send-keys", "-t", "agy", "Enter"]
