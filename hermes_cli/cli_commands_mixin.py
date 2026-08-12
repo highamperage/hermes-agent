@@ -3533,7 +3533,12 @@ class CLICommandsMixin:
         triggers CLI session exit). Returns ``False`` when cancelled or on error.
         """
         import subprocess
+        import os
+        import json
+        import time
+        import uuid
         from hermes_cli.config import is_managed, format_managed_message
+        from hermes_constants import get_hermes_home
 
         if is_managed():
             print(f"  ✗ {format_managed_message('update Hermes Agent')}")
@@ -3552,6 +3557,38 @@ class CLICommandsMixin:
         except FileNotFoundError:
             print("  ✗ tmux is not installed or not available in PATH.")
             return False
+
+        # Check for active update state
+        state_file = os.path.join(get_hermes_home(), "update_task.json")
+        try:
+            if os.path.exists(state_file):
+                with open(state_file, "r") as f:
+                    state = json.load(f)
+
+                is_stale = False
+                if time.time() - state.get("start_time", 0) > 3600:
+                    is_stale = True
+                else:
+                    cap = subprocess.run(["tmux", "capture-pane", "-p", "-t", "agy"], capture_output=True)
+                    pane_text = cap.stdout.decode("utf-8", errors="replace").splitlines() if cap.returncode == 0 else []
+                    found_terminal = any(
+                        line.strip() == f"AGY DONE {state.get('task_token')}" or
+                        line.strip() == f"AGY FAILED {state.get('task_token')}"
+                        for line in pane_text
+                    )
+                    if found_terminal or cap.returncode != 0:
+                        is_stale = True
+
+                if not is_stale:
+                    print("  ✗ An update task is already active. Please wait for it to complete.")
+                    return False
+                else:
+                    try:
+                        os.remove(state_file)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         # Use the prompt_toolkit-native modal so the confirmation panel
         # renders properly above the composer and avoids raw input() races
@@ -3575,15 +3612,34 @@ class CLICommandsMixin:
             return False
 
         task_token = str(uuid.uuid4())
+
+        state_data = {
+            "task_token": task_token,
+            "start_time": time.time(),
+            "target": "agy"
+        }
+
+        try:
+            fd = os.open(state_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(state_data, f)
+        except FileExistsError:
+            print("  ✗ An update task started concurrently.")
+            return False
+        except Exception as e:
+            print(f"  ✗ Failed to create update task state: {e}")
+            return False
         prompt = (
             "Execute self-contained update workflow in /home/hermes/.hermes/hermes-agent: "
-            "1. Perform repository checks: cd /home/hermes/.hermes/hermes-agent, verify repository root (git rev-parse --show-toplevel), main branch, and remotes (origin is https://github.com/highamperage/hermes-agent.git and upstream is https://github.com/NousResearch/hermes-agent.git). "
-            "2. Inspect git status and preserve local changes. Perform a local commit for any current local modifications on main with a clear human-readable commit message. "
-            "3. Perform upstream merge: git fetch upstream and git merge upstream/main into main. Stop on conflicts immediately if merge conflicts occur. "
-            "4. Perform origin/main push and pull: git push origin main and git pull origin main. Unset COPILOT_GITHUB_TOKEN and GITHUB_TOKEN if set. "
-            "5. Run the documented build command (e.g., cd ui-tui && npm run build). "
-            "6. Run one quick targeted smoke test relevant to the changed code, but do NOT run the full test suite, do NOT reset (no reset), and do NOT force-push (no force-push). "
-            f"7. Report final SHA (git rev-parse HEAD), git status, and build result, ending with an AGY DONE {task_token} sentinel on its own line."
+            "1. Perform repository checks: cd /home/hermes/.hermes/hermes-agent, verify repository root (git rev-parse --show-toplevel), main branch, and remotes (origin and upstream). "
+            "2. Fetch origin and upstream. "
+            "3. Inspect git status. Do NOT commit unrelated pre-existing user work. If local modifications are present, report them and stop unless they are clearly part of the update repair task. "
+            "4. Integrate upstream/main into main, then integrate origin/main if origin advanced. Stop on conflicts and never commit unrelated work. "
+            "5. Run the documented build command (e.g., cd ui-tui && npm run build) and one quick targeted smoke test relevant to the changed code. Do NOT run the full test suite. "
+            "6. Inspect final status and SHA. Only then push the verified final main to origin/main. Unset COPILOT_GITHUB_TOKEN and GITHUB_TOKEN if set. "
+            "7. Verify the push and report final SHA/status/build/smoke/push result. "
+            "8. Explicit constraints: never reset and never force-push. "
+            f"9. End with exact success or failure marker on its own line: AGY DONE {task_token} only after successful completion, or AGY FAILED {task_token} if any step fails."
         )
 
         try:
@@ -3596,6 +3652,8 @@ class CLICommandsMixin:
             if load_proc.returncode != 0:
                 err = load_proc.stderr.decode("utf-8", errors="replace").strip()
                 print(f"  ✗ Failed to load tmux paste buffer: {err}")
+                try: os.remove(state_file)
+                except: pass
                 return False
 
             # Paste buffer into agy session
@@ -3606,6 +3664,8 @@ class CLICommandsMixin:
             if paste_proc.returncode != 0:
                 err = paste_proc.stderr.decode("utf-8", errors="replace").strip()
                 print(f"  ✗ Failed to paste buffer into tmux session 'agy': {err}")
+                try: os.remove(state_file)
+                except: pass
                 return False
 
             # Send Enter keypress
@@ -3616,9 +3676,15 @@ class CLICommandsMixin:
             if send_proc.returncode != 0:
                 err = send_proc.stderr.decode("utf-8", errors="replace").strip()
                 print(f"  ✗ Failed to send key to tmux session 'agy': {err}")
+                try: os.remove(state_file)
+                except: pass
                 return False
         except Exception as exc:
             print(f"  ✗ Failed to dispatch to tmux session 'agy': {exc}")
+            try:
+                os.remove(state_file)
+            except Exception:
+                pass
             return False
 
         print()

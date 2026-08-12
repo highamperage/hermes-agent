@@ -83,7 +83,7 @@ def test_no_upstream_remote_preserves_behavior(tmp_path):
     git_cmd = ["git"]
     fake_run = _make_subprocess_run(has_upstream=False)
 
-    with patch("subprocess.run", side_effect=fake_run):
+    with patch("subprocess.run", side_effect=fake_run), patch("builtins.input", return_value="n"):
         result = _sync_with_upstream_if_needed(git_cmd, tmp_path)
 
     assert result is True
@@ -182,3 +182,22 @@ def test_push_failure_reported(tmp_path, capsys):
     assert "Push to origin/main failed" in out
     assert "Authentication failed" in out
     assert "The upstream merge succeeded locally, but could not be pushed" in out
+
+def test_no_force_push_arguments(tmp_path):
+    """Ensure upstream sync does not contain any force-push arguments."""
+    git_cmd = ["git"]
+    fake_run = _make_subprocess_run(has_upstream=True, is_ancestor=False)
+
+    with patch("subprocess.run", side_effect=fake_run) as mock_run, patch(
+        "hermes_cli.update_cmd._validate_critical_files_syntax",
+        return_value=(True, None, None),
+    ):
+        result = _sync_with_upstream_if_needed(git_cmd, tmp_path)
+
+    assert result is True
+
+    for call_args in mock_run.call_args_list:
+        cmd = call_args[0][0]
+        cmd_str = " ".join(cmd)
+        assert "--force" not in cmd_str
+        assert "--force-with-lease" not in cmd_str

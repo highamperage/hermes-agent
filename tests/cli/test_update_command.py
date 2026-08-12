@@ -11,9 +11,16 @@ Verifies that ``HermesCLI._handle_update_command`` correctly:
 from __future__ import annotations
 
 from types import SimpleNamespace
+import os
+import subprocess
 from unittest.mock import MagicMock, patch
-
 import pytest
+
+@pytest.fixture(autouse=True)
+def mock_hermes_home(tmp_path):
+    with patch("hermes_constants.get_hermes_home", return_value=str(tmp_path)), \
+         patch("hermes_cli.agy_watcher.get_hermes_home", return_value=str(tmp_path), create=True):
+        yield tmp_path
 
 from cli import HermesCLI
 
@@ -122,8 +129,6 @@ def test_session_missing_refuses_and_returns_false(capsys):
 
 @pytest.mark.parametrize("answer", ["y", "Y", "yes", "YES", "1", "ok"])
 def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, capsys):
-    """Recognised affirmative answers ("y", "yes", "1", "ok") dispatch the AGY prompt
-    via tmux paste-buffer, return ``True``, and do NOT set ``_pending_relaunch``."""
     self_ = _make_self(modal_response=answer)
 
     mock_run = MagicMock()
@@ -141,7 +146,6 @@ def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, caps
     out = capsys.readouterr().out
     assert "Dispatched update task to tmux session 'agy'" in out
 
-    # Verify subprocess calls: has-session, load-buffer, paste-buffer, send-keys
     calls = mock_run.call_args_list
     assert len(calls) == 4
     assert calls[0][0][0] == ["tmux", "has-session", "-t", "agy"]
@@ -149,18 +153,18 @@ def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, caps
     prompt_sent = calls[1][1]["input"].decode("utf-8")
     assert "Execute self-contained update workflow" in prompt_sent
     assert "repository checks" in prompt_sent
-    assert "local commit" in prompt_sent
-    assert "upstream merge" in prompt_sent
-    assert "origin/main push and pull" in prompt_sent
+    assert "Fetch origin and upstream" in prompt_sent
+    assert "Do NOT commit unrelated pre-existing user work" in prompt_sent
+    assert "Integrate upstream/main into main" in prompt_sent
+    assert "Inspect final status and SHA. Only then push the verified final main" in prompt_sent
     assert "documented build" in prompt_sent
     assert "smoke test" in prompt_sent
-    assert "no reset" in prompt_sent
-    assert "no force-push" in prompt_sent
+    assert "never reset" in prompt_sent
+    assert "never force-push" in prompt_sent
     assert "Stop on conflicts" in prompt_sent
     assert "AGY DONE" in prompt_sent
     assert calls[2][0][0] == ["tmux", "paste-buffer", "-t", "agy"]
     assert calls[3][0][0] == ["tmux", "send-keys", "-t", "agy", "Enter"]
-
 
 # ---------------------------------------------------------------------------
 # Cancellation paths — _pending_relaunch must stay None
@@ -223,3 +227,215 @@ def test_unrecognized_or_cancel_input_cancels(answer, capsys):
     assert self_._pending_relaunch is None
     assert not result
     assert mock_run.call_count == 1
+
+import sys
+import time
+import json
+from hermes_cli import agy_watcher
+
+def test_active_update_refuses_dispatch(capsys, mock_hermes_home):
+    self_ = _make_self(modal_response="y")
+
+    # Create fake active state
+    state_file = mock_hermes_home / "update_task.json"
+    state_file.write_text(json.dumps({"task_token": "foo", "start_time": time.time(), "target": "agy"}))
+
+    def _mock_run(cmd, **kwargs):
+        if cmd[0:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if cmd[0:2] == ["tmux", "capture-pane"]:
+            # Active update: no AGY DONE token
+            return SimpleNamespace(returncode=0, stdout=b"some pane text\n", stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    with (
+        patch("hermes_cli.config.is_managed", return_value=False),
+        patch("subprocess.run", side_effect=_mock_run),
+    ):
+        result = _call(self_)
+
+    out = capsys.readouterr().out
+    assert "An update task is already active" in out
+    assert result is False
+
+def test_stale_update_recovers_dispatch(capsys, mock_hermes_home):
+    self_ = _make_self(modal_response="y")
+
+    state_file = mock_hermes_home / "update_task.json"
+    # Old start time
+    state_file.write_text(json.dumps({"task_token": "foo", "start_time": time.time() - 4000, "target": "agy"}))
+
+    def _mock_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    with (
+        patch("hermes_cli.config.is_managed", return_value=False),
+        patch("subprocess.run", side_effect=_mock_run),
+        patch("subprocess.Popen"),
+    ):
+        result = _call(self_)
+
+    # Should recover and dispatch
+    assert result is True
+    # The original state file should have been replaced with a new one
+    new_state = json.loads(state_file.read_text())
+    assert new_state["task_token"] != "foo"
+
+def test_dispatch_failure_aborts_cleanly(capsys, mock_hermes_home):
+    for fail_cmd_prefix in [["tmux", "load-buffer"], ["tmux", "paste-buffer"], ["tmux", "send-keys"]]:
+        self_ = _make_self(modal_response="y")
+
+        def _mock_run(cmd, **kwargs):
+            if cmd[0:2] == ["tmux", "has-session"]:
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+            if cmd[0:2] == ["tmux", "capture-pane"]:
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+            if cmd[0:2] == fail_cmd_prefix:
+                return SimpleNamespace(returncode=1, stdout=b"", stderr=b"fake error")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        with (
+            patch("hermes_cli.config.is_managed", return_value=False),
+            patch("subprocess.run", side_effect=_mock_run),
+            patch("subprocess.Popen") as mock_popen,
+        ):
+            result = _call(self_)
+
+        out = capsys.readouterr().out
+        assert "Failed" in out
+        assert "fake error" in out
+        assert result is False
+        mock_popen.assert_not_called()
+        # State file should be removed
+        assert not (mock_hermes_home / "update_task.json").exists()
+
+def test_watcher_success(tmp_path, mock_hermes_home):
+    tty_path = tmp_path / "tty.log"
+    token = "test-token-123"
+
+    state_file = mock_hermes_home / "update_task.json"
+    state_file.write_text(json.dumps({"task_token": token, "start_time": time.time(), "target": "agy", }))
+
+    def _mock_run(cmd, **kwargs):
+        if cmd[0:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0:2] == ["tmux", "capture-pane"]:
+            return SimpleNamespace(returncode=0, stdout=f"Some progress\nAGY DONE {token}\n".encode('utf-8'), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with (
+        patch.object(sys, "argv", ["agy_watcher.py", str(tty_path), token]),
+        patch("subprocess.run", side_effect=_mock_run),
+        patch("time.sleep"),
+        patch("time.time", return_value=1000.0)
+    ):
+        agy_watcher.main()
+
+    content = tty_path.read_text()
+    assert "[Watcher] Polling AGY update progress" in content
+    assert "[Watcher] ✓ Update workflow completed" in content
+
+    # State file should be cleaned up
+    assert not state_file.exists()
+
+
+def test_watcher_failed(tmp_path, mock_hermes_home):
+    tty_path = tmp_path / "tty.log"
+    token = "test-token-123"
+
+    state_file = mock_hermes_home / "update_task.json"
+    state_file.write_text(json.dumps({"task_token": token, "start_time": time.time(), "target": "agy"}))
+
+    def _mock_run(cmd, **kwargs):
+        if cmd[0:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0:2] == ["tmux", "capture-pane"]:
+            return SimpleNamespace(returncode=0, stdout=f"Some progress\nAGY FAILED {token}\n".encode('utf-8'), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with (
+        patch.object(sys, "argv", ["agy_watcher.py", str(tty_path), token]),
+        patch("subprocess.run", side_effect=_mock_run),
+        patch("time.sleep"),
+        patch("time.time", return_value=1000.0)
+    ):
+        agy_watcher.main()
+
+    content = tty_path.read_text()
+    assert "[Watcher] ✗ Update workflow failed." in content
+
+def test_watcher_stale_pane_output_ignored(tmp_path, mock_hermes_home):
+
+    tty_path = tmp_path / "tty.log"
+    token = "current-token"
+
+    state_file = mock_hermes_home / "update_task.json"
+    state_file.write_text(json.dumps({"task_token": token, "start_time": time.time(), "target": "agy", }))
+
+    call_count = [0]
+    def _mock_run(cmd, **kwargs):
+        if cmd[0:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0:2] == ["tmux", "capture-pane"]:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return SimpleNamespace(returncode=0, stdout="Old line 1\nAGY DONE stale-token\n".encode('utf-8'), stderr="")
+            if call_count[0] == 2:
+                # First line is skipped because baseline=1
+                return SimpleNamespace(returncode=0, stdout="Old line 1\nNew progress\n".encode('utf-8'), stderr="")
+            return SimpleNamespace(returncode=0, stdout=f"Old line 1\nNew progress\nAGY DONE {token}\n".encode('utf-8'), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with (
+        patch.object(sys, "argv", ["agy_watcher.py", str(tty_path), token]),
+        patch("subprocess.run", side_effect=_mock_run),
+        patch("time.sleep"),
+        patch("time.time", return_value=1000.0)
+    ):
+        agy_watcher.main()
+
+    content = tty_path.read_text()
+    assert "[AGY] New progress" in content
+    assert "[AGY] Old line 1" not in content
+
+def test_watcher_timeout(tmp_path, mock_hermes_home):
+    tty_path = tmp_path / "tty.log"
+    token = "tok"
+
+    def _mock_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    time_vals = [1000.0, 3000.0]
+    def _mock_time():
+        return time_vals.pop(0) if time_vals else 3000.0
+
+    with (
+        patch.object(sys, "argv", ["agy_watcher.py", str(tty_path), token]),
+        patch("subprocess.run", side_effect=_mock_run),
+        patch("time.sleep"),
+        patch("time.time", side_effect=_mock_time)
+    ):
+        agy_watcher.main()
+
+    content = tty_path.read_text()
+    assert "Timeout exceeded. Stopping watcher." in content
+
+def test_watcher_tmux_disappears(tmp_path, mock_hermes_home):
+    tty_path = tmp_path / "tty.log"
+    token = "tok"
+
+    def _mock_run(cmd, **kwargs):
+        if cmd[0:2] == ["tmux", "has-session"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    with (
+        patch.object(sys, "argv", ["agy_watcher.py", str(tty_path), token]),
+        patch("subprocess.run", side_effect=_mock_run),
+        patch("time.sleep"),
+        patch("time.time", return_value=1000.0)
+    ):
+        agy_watcher.main()
+
+    content = tty_path.read_text()
+    assert "tmux session 'agy' disappeared or failed" in content
