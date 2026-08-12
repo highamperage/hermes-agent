@@ -3582,7 +3582,7 @@ class CLICommandsMixin:
             "3. Perform upstream merge: git fetch upstream and git merge upstream/main into main. Stop on conflicts immediately if merge conflicts occur. "
             "4. Perform origin/main push and pull: git push origin main and git pull origin main. Unset COPILOT_GITHUB_TOKEN and GITHUB_TOKEN if set. "
             "5. Run the documented build command (e.g., cd ui-tui && npm run build). "
-            "6. Explicit constraints: Do NOT run tests (no tests), do NOT reset (no reset), and do NOT force-push (no force-push). "
+            "6. Run one quick targeted smoke test relevant to the changed code, but do NOT run the full test suite, do NOT reset (no reset), and do NOT force-push (no force-push). "
             f"7. Report final SHA (git rev-parse HEAD), git status, and build result, ending with an AGY DONE {task_token} sentinel on its own line."
         )
 
