@@ -1621,12 +1621,8 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> bool:
             _mark_skip_upstream_prompt()
             return True
 
-    # Fetch upstream main only. This sync compares upstream/main with
-    # origin/main, so there's no reason to pull every upstream ref — and a bare
-    # fetch drags in thousands of auto-generated branches.
-    print()
-    print("→ Fetching upstream...")
->>>>>>> upstream/main
+    # Determine branch to sync against (current checked-out branch or default main)
+    current_branch = "main"
     try:
         res = subprocess.run(
             git_cmd + ["rev-parse", "--abbrev-ref", "HEAD"],
