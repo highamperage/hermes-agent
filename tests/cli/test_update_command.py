@@ -166,6 +166,9 @@ def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, caps
     assert "ordinary 'git push origin main'" in prompt_sent
     assert "Never force-push" in prompt_sent
     assert "Verify origin/main equals HEAD after pushing" in prompt_sent
+    assert "systemctl --user restart hermes-gateway" in prompt_sent
+    assert "systemctl --user is-active hermes-gateway returns active" in prompt_sent
+    assert "If restart fails, the workflow must end with AGY FAILED" in prompt_sent
     assert "AGY DONE" in prompt_sent
     assert calls[2][0][0] == ["tmux", "paste-buffer", "-t", "agy"]
     assert calls[3][0][0] == ["tmux", "send-keys", "-t", "agy", "Enter"]

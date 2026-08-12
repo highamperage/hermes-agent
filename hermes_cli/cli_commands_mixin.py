@@ -3639,7 +3639,8 @@ class CLICommandsMixin:
             "6. Before GitHub operations, unset COPILOT_GITHUB_TOKEN only (never use the Copilot token for Git). Do NOT unset GITHUB_TOKEN. Source credentials using 'set -a; source /home/hermes/.hermes/github-highamperage.env; set +a'. Verify the personal token owner through GitHub API and require login 'highamperage' before pushing. "
             "7. Push the verified commit/state directly to origin main with ordinary 'git push origin main'. Never force-push. If authentication or the push fails, report failure and do not claim success. "
             "8. Verify origin/main equals HEAD after pushing, and report commit SHA, build result, smoke-test result, and push result. "
-            f"9. End with exact success or failure marker on its own line: AGY DONE {task_token} only after successful completion, or AGY FAILED {task_token} if any step fails."
+            "9. ONLY after all existing update steps succeed, including verifying origin/main equals HEAD, restart the user systemd Hermes gateway with: systemctl --user restart hermes-gateway. Then verify systemctl --user is-active hermes-gateway returns active and report the restart result. If restart fails, the workflow must end with AGY FAILED, not AGY DONE. "
+            f"10. End with exact success or failure marker on its own line: AGY DONE {task_token} only after successful completion, or AGY FAILED {task_token} if any step fails."
         )
 
         try:
