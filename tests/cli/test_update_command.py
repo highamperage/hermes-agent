@@ -154,14 +154,18 @@ def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, caps
     assert "Execute self-contained update workflow" in prompt_sent
     assert "repository checks" in prompt_sent
     assert "Fetch origin and upstream" in prompt_sent
-    assert "Do NOT commit unrelated pre-existing user work" in prompt_sent
     assert "Integrate upstream/main into main" in prompt_sent
-    assert "Inspect final status and SHA. Only then push the verified final main" in prompt_sent
     assert "documented build" in prompt_sent
-    assert "smoke test" in prompt_sent
-    assert "never reset" in prompt_sent
-    assert "never force-push" in prompt_sent
-    assert "Stop on conflicts" in prompt_sent
+    assert "Stage and commit only the intended update changes" in prompt_sent
+    assert "unset COPILOT_GITHUB_TOKEN only" in prompt_sent
+    assert "Do NOT unset GITHUB_TOKEN" in prompt_sent
+    assert "Unset COPILOT_GITHUB_TOKEN and GITHUB_TOKEN" not in prompt_sent
+    assert "github-highamperage.env" in prompt_sent
+    assert "Verify the personal token owner" in prompt_sent
+    assert "require login 'highamperage'" in prompt_sent
+    assert "ordinary 'git push origin main'" in prompt_sent
+    assert "Never force-push" in prompt_sent
+    assert "Verify origin/main equals HEAD after pushing" in prompt_sent
     assert "AGY DONE" in prompt_sent
     assert calls[2][0][0] == ["tmux", "paste-buffer", "-t", "agy"]
     assert calls[3][0][0] == ["tmux", "send-keys", "-t", "agy", "Enter"]

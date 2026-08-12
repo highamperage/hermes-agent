@@ -3633,12 +3633,12 @@ class CLICommandsMixin:
             "Execute self-contained update workflow in /home/hermes/.hermes/hermes-agent: "
             "1. Perform repository checks: cd /home/hermes/.hermes/hermes-agent, verify repository root (git rev-parse --show-toplevel), main branch, and remotes (origin and upstream). "
             "2. Fetch origin and upstream. "
-            "3. Inspect git status. Do NOT commit unrelated pre-existing user work. If local modifications are present, report them and stop unless they are clearly part of the update repair task. "
-            "4. Integrate upstream/main into main, then integrate origin/main if origin advanced. Stop on conflicts and never commit unrelated work. "
-            "5. Run the documented build command (e.g., cd ui-tui && npm run build) and one quick targeted smoke test relevant to the changed code. Do NOT run the full test suite. "
-            "6. Inspect final status and SHA. Only then push the verified final main to origin/main. Unset COPILOT_GITHUB_TOKEN and GITHUB_TOKEN if set. "
-            "7. Verify the push and report final SHA/status/build/smoke/push result. "
-            "8. Explicit constraints: never reset and never force-push. "
+            "3. Integrate upstream/main into main, then integrate origin/main if origin advanced. Stop on conflicts and never commit unrelated work. "
+            "4. Run the documented build command (e.g., cd ui-tui && npm run build) and one quick targeted smoke test relevant to the changed code. Do NOT run the full test suite. "
+            "5. After checks, integration, build, and testing, inspect git diff and status. Refuse unrelated pre-existing changes. Stage and commit only the intended update changes to the Hermes repository on main, using a clear conventional commit message. If there are no intended changes, do not create an empty commit. "
+            "6. Before GitHub operations, unset COPILOT_GITHUB_TOKEN only (never use the Copilot token for Git). Do NOT unset GITHUB_TOKEN. Source credentials using 'set -a; source /home/hermes/.hermes/github-highamperage.env; set +a'. Verify the personal token owner through GitHub API and require login 'highamperage' before pushing. "
+            "7. Push the verified commit/state directly to origin main with ordinary 'git push origin main'. Never force-push. If authentication or the push fails, report failure and do not claim success. "
+            "8. Verify origin/main equals HEAD after pushing, and report commit SHA, build result, smoke-test result, and push result. "
             f"9. End with exact success or failure marker on its own line: AGY DONE {task_token} only after successful completion, or AGY FAILED {task_token} if any step fails."
         )
 
