@@ -3191,21 +3191,34 @@ class CLICommandsMixin:
         run_debug_share(args)
 
     def _handle_update_command(self) -> bool:
-        """Handle /update — update Hermes Agent to the latest version.
+        """Handle /update — dispatch self-contained update workflow to tmux session 'agy'.
 
-        In the classic CLI this exits the session and relaunches as
-        ``hermes update`` so the user sees update output directly and gets
-        the new version on next launch.
+        Checks that the interactive tmux session 'agy' exists, prompts for user
+        confirmation, and dispatches the AGY update prompt via tmux paste-buffer.
+        Exits the current Hermes CLI session cleanly without launching `hermes update`.
 
-        Returns ``True`` when the update was confirmed (caller should trigger
-        app exit so the relaunch is deferred to the main thread after
-        prompt_toolkit cleans up terminal modes).  Returns ``False`` / falsy
-        when cancelled.
+        Returns ``True`` when the update task was confirmed and dispatched (caller
+        triggers CLI session exit). Returns ``False`` when cancelled or on error.
         """
+        import subprocess
         from hermes_cli.config import is_managed, format_managed_message
 
         if is_managed():
             print(f"  ✗ {format_managed_message('update Hermes Agent')}")
+            return False
+
+        # Verify interactive tmux session 'agy' exists
+        try:
+            has_session = subprocess.run(
+                ["tmux", "has-session", "-t", "agy"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if has_session.returncode != 0:
+                print("  ✗ tmux session 'agy' not found. Please start an interactive tmux session named 'agy'.")
+                return False
+        except FileNotFoundError:
+            print("  ✗ tmux is not installed or not available in PATH.")
             return False
 
         # Use the prompt_toolkit-native modal so the confirmation panel
@@ -3213,12 +3226,12 @@ class CLICommandsMixin:
         # with the prompt_toolkit event loop (same pattern as
         # _confirm_destructive_slash).
         choices = [
-            ("once", "Update Now", "exit the current session and update Hermes Agent"),
+            ("once", "Update Now", "dispatch update task to tmux session 'agy' and exit"),
             ("cancel", "Cancel", "keep the current session"),
         ]
         raw = self._prompt_text_input_modal(
-            title="⚕  Update Hermes Agent",
-            detail="This will exit the current session and run `hermes update`.",
+            title="⚕  Update Hermes Agent via AGY",
+            detail="This will dispatch a self-contained update task to tmux session 'agy' and exit this session.",
             choices=choices,
         )
         if raw is None:
@@ -3229,17 +3242,55 @@ class CLICommandsMixin:
             print("  🟡 /update cancelled.")
             return False
 
-        print()
-        print("  ⚕ Launching update...")
-        print()
+        prompt = (
+            "Execute self-contained update workflow in /home/hermes/.hermes/hermes-agent: "
+            "1. Perform repository checks: cd /home/hermes/.hermes/hermes-agent, verify repository root (git rev-parse --show-toplevel), main branch, and remotes (origin is https://github.com/highamperage/hermes-agent.git and upstream is https://github.com/NousResearch/hermes-agent.git). "
+            "2. Inspect git status and preserve local changes. Perform a local commit for any current local modifications on main with a clear human-readable commit message. "
+            "3. Perform upstream merge: git fetch upstream and git merge upstream/main into main. Stop on conflicts immediately if merge conflicts occur. "
+            "4. Perform origin/main push and pull: git push origin main and git pull origin main. Unset COPILOT_GITHUB_TOKEN and GITHUB_TOKEN if set. "
+            "5. Run the documented build command (e.g., cd ui-tui && npm run build). "
+            "6. Explicit constraints: Do NOT run tests (no tests), do NOT reset (no reset), and do NOT force-push (no force-push). "
+            "7. Report final SHA (git rev-parse HEAD), git status, and build result, ending with an AGY DONE sentinel on its own line."
+        )
 
-        # Store the relaunch args so run() can exec them from the main thread
-        # after prompt_toolkit exits and restores terminal modes.  Calling
-        # relaunch() directly here (from the process_loop daemon thread) would
-        # skip terminal cleanup on POSIX (execvp replaces the process mid-TUI)
-        # and only exit the worker thread on Windows (subprocess.run +
-        # sys.exit inside a non-main thread does not exit the process).
-        self._pending_relaunch = ["update"]
+        try:
+            # Load prompt into tmux paste buffer
+            load_proc = subprocess.run(
+                ["tmux", "load-buffer", "-"],
+                input=prompt.encode("utf-8"),
+                capture_output=True,
+            )
+            if load_proc.returncode != 0:
+                err = load_proc.stderr.decode("utf-8", errors="replace").strip()
+                print(f"  ✗ Failed to load tmux paste buffer: {err}")
+                return False
+
+            # Paste buffer into agy session
+            paste_proc = subprocess.run(
+                ["tmux", "paste-buffer", "-t", "agy"],
+                capture_output=True,
+            )
+            if paste_proc.returncode != 0:
+                err = paste_proc.stderr.decode("utf-8", errors="replace").strip()
+                print(f"  ✗ Failed to paste buffer into tmux session 'agy': {err}")
+                return False
+
+            # Send Enter keypress
+            send_proc = subprocess.run(
+                ["tmux", "send-keys", "-t", "agy", "Enter"],
+                capture_output=True,
+            )
+            if send_proc.returncode != 0:
+                err = send_proc.stderr.decode("utf-8", errors="replace").strip()
+                print(f"  ✗ Failed to send key to tmux session 'agy': {err}")
+                return False
+        except Exception as exc:
+            print(f"  ✗ Failed to dispatch to tmux session 'agy': {exc}")
+            return False
+
+        print()
+        print("  ⚕ Dispatched update task to tmux session 'agy'. Exiting session...")
+        print()
         return True
 
     def _handle_voice_command(self, command: str):

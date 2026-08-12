@@ -2,23 +2,16 @@
 
 Verifies that ``HermesCLI._handle_update_command`` correctly:
 - Refuses to run under a managed install (Homebrew, Docker, etc.)
-- Sets ``_pending_relaunch`` and returns ``True`` on confirmation
+- Refuses to run when the interactive tmux session 'agy' is missing
+- Dispatches the AGY update workflow via tmux paste-buffer and returns ``True`` on confirmation
 - Cancels cleanly on a "no"-shaped answer or unrecognized input
-- Cancels cleanly when ``_prompt_text_input_modal`` returns None (timeout /
-  modal dismissed)
-
-Also verifies that ``hermes_cli.main._launch_tui`` correctly handles exit
-code 42 (the TUI's signal to trigger an update) by calling
-``relaunch(["update"], preserve_inherited=False)`` from the Python wrapper
-side.  The companion Vitest (``ui-tui/src/__tests__/createSlashHandler.test.ts``)
-covers the TypeScript slash-handler that *emits* code 42; this file covers
-the Python wrapper branch that *acts on* it.
+- Cancels cleanly when ``_prompt_text_input_modal`` returns None (timeout / modal dismissed)
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -66,7 +59,6 @@ def test_managed_install_refuses_and_does_not_set_pending_relaunch(capsys):
     self_ = SimpleNamespace(
         _app=None,
         _pending_relaunch=None,
-        # Use pytest.fail so any unexpected modal invocation surfaces as a failure.
         _prompt_text_input_modal=lambda **_kw: pytest.fail("Modal should not be called"),
     )
     self_._normalize_slash_confirm_choice = _bound(
@@ -88,22 +80,84 @@ def test_managed_install_refuses_and_does_not_set_pending_relaunch(capsys):
 
 
 # ---------------------------------------------------------------------------
-# Confirmation proceeds only on recognised affirmative responses
+# Session-missing check
+# ---------------------------------------------------------------------------
+
+
+def test_session_missing_refuses_and_returns_false(capsys):
+    """When tmux session 'agy' does not exist, /update prints an error and returns False."""
+    self_ = SimpleNamespace(
+        _app=None,
+        _pending_relaunch=None,
+        _prompt_text_input_modal=lambda **_kw: pytest.fail("Modal should not be called"),
+    )
+    self_._normalize_slash_confirm_choice = _bound(
+        HermesCLI._normalize_slash_confirm_choice, self_
+    )
+    mock_run = MagicMock()
+    mock_run.return_value = SimpleNamespace(returncode=1, stdout=b"", stderr=b"session not found")
+
+    with (
+        patch("hermes_cli.config.is_managed", return_value=False),
+        patch("subprocess.run", mock_run),
+    ):
+        result = _call(self_)
+
+    out = capsys.readouterr().out
+    assert "tmux session 'agy' not found" in out
+    assert self_._pending_relaunch is None
+    assert result is False
+    mock_run.assert_called_once_with(
+        ["tmux", "has-session", "-t", "agy"],
+        stdout=-1,
+        stderr=-1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Confirmation proceeds and dispatches to agy tmux session
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("answer", ["y", "Y", "yes", "YES", "1", "ok"])
-def test_affirmative_answer_sets_pending_relaunch_and_returns_true(answer, capsys):
-    """Recognised affirmative answers ("y", "yes", "1", "ok") set
-    ``_pending_relaunch = ["update"]`` and return ``True`` so the caller
-    (process_command) can trigger the main-thread app-exit path."""
+def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, capsys):
+    """Recognised affirmative answers ("y", "yes", "1", "ok") dispatch the AGY prompt
+    via tmux paste-buffer, return ``True``, and do NOT set ``_pending_relaunch``."""
     self_ = _make_self(modal_response=answer)
-    with patch("hermes_cli.config.is_managed", return_value=False):
+
+    mock_run = MagicMock()
+    mock_run.return_value = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    with (
+        patch("hermes_cli.config.is_managed", return_value=False),
+        patch("subprocess.run", mock_run),
+    ):
         result = _call(self_)
 
-    assert self_._pending_relaunch == ["update"]
+    assert self_._pending_relaunch is None
     assert result is True
-    assert "Launching update" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Dispatched update task to tmux session 'agy'" in out
+
+    # Verify subprocess calls: has-session, load-buffer, paste-buffer, send-keys
+    calls = mock_run.call_args_list
+    assert len(calls) == 4
+    assert calls[0][0][0] == ["tmux", "has-session", "-t", "agy"]
+    assert calls[1][0][0] == ["tmux", "load-buffer", "-"]
+    prompt_sent = calls[1][1]["input"].decode("utf-8")
+    assert "Execute self-contained update workflow" in prompt_sent
+    assert "repository checks" in prompt_sent
+    assert "local commit" in prompt_sent
+    assert "upstream merge" in prompt_sent
+    assert "origin/main push and pull" in prompt_sent
+    assert "documented build" in prompt_sent
+    assert "no tests" in prompt_sent
+    assert "no reset" in prompt_sent
+    assert "no force-push" in prompt_sent
+    assert "stop on conflicts" in prompt_sent
+    assert "AGY DONE" in prompt_sent
+    assert calls[2][0][0] == ["tmux", "paste-buffer", "-t", "agy"]
+    assert calls[3][0][0] == ["tmux", "send-keys", "-t", "agy", "Enter"]
 
 
 # ---------------------------------------------------------------------------
@@ -113,38 +167,57 @@ def test_affirmative_answer_sets_pending_relaunch_and_returns_true(answer, capsy
 
 @pytest.mark.parametrize("answer", ["n", "N", "no", "NO", " no "])
 def test_negative_answer_cancels(answer, capsys):
-    """Any "no"-shaped answer cancels without setting ``_pending_relaunch``."""
+    """Any "no"-shaped answer cancels without dispatching or setting ``_pending_relaunch``."""
     self_ = _make_self(modal_response=answer)
-    with patch("hermes_cli.config.is_managed", return_value=False):
+
+    mock_run = MagicMock()
+    mock_run.return_value = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    with (
+        patch("hermes_cli.config.is_managed", return_value=False),
+        patch("subprocess.run", mock_run),
+    ):
         result = _call(self_)
 
     assert self_._pending_relaunch is None
     assert not result
-    assert "Launching update" not in capsys.readouterr().out
+    assert "Dispatched update task" not in capsys.readouterr().out
+    # Only has-session should have been called before confirmation modal
+    assert mock_run.call_count == 1
 
 
 def test_none_response_cancels(capsys):
     """``None`` from the modal (timeout or dismiss) cancels cleanly."""
     self_ = _make_self(modal_response=None)
-    with patch("hermes_cli.config.is_managed", return_value=False):
+
+    mock_run = MagicMock()
+    mock_run.return_value = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    with (
+        patch("hermes_cli.config.is_managed", return_value=False),
+        patch("subprocess.run", mock_run),
+    ):
         result = _call(self_)
 
     assert self_._pending_relaunch is None
     assert not result
+    assert mock_run.call_count == 1
 
 
 @pytest.mark.parametrize("answer", ["nope", "cancel", "sure", "2", "3", "abort", ""])
 def test_unrecognized_or_cancel_input_cancels(answer, capsys):
-    """Unrecognised input and explicit "cancel" do not proceed.
-
-    Previously the implementation treated any non-"n/no" answer as approval,
-    which meant typos like "nope" or "cancel" would launch the update.
-    Now only confirmed affirmative aliases ("y", "yes", "1", "ok") proceed;
-    everything else (including empty string, "cancel", typos) cancels.
-    """
+    """Unrecognised input and explicit "cancel" do not proceed."""
     self_ = _make_self(modal_response=answer)
-    with patch("hermes_cli.config.is_managed", return_value=False):
+
+    mock_run = MagicMock()
+    mock_run.return_value = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    with (
+        patch("hermes_cli.config.is_managed", return_value=False),
+        patch("subprocess.run", mock_run),
+    ):
         result = _call(self_)
 
     assert self_._pending_relaunch is None
     assert not result
+    assert mock_run.call_count == 1
