@@ -3558,6 +3558,26 @@ class CLICommandsMixin:
             print("  ✗ tmux is not installed or not available in PATH.")
             return False
 
+        # Busy-pane safety check
+        try:
+            cap_busy = subprocess.run(["tmux", "capture-pane", "-p", "-t", "agy"], capture_output=True)
+            if cap_busy.returncode == 0:
+                pane_text = cap_busy.stdout.decode("utf-8", errors="replace")
+                busy_indicators = [
+                    "Generating...",
+                    "Thinking...",
+                    "Queued:",
+                    "[Queued]",
+                    "Working...",
+                    "Executing task",
+                    "⚙"
+                ]
+                if any(ind in pane_text for ind in busy_indicators):
+                    print("  ✗ tmux session 'agy' appears busy (found generation or queued indicators).")
+                    return False
+        except Exception:
+            pass
+
         # Check for active update state
         state_file = os.path.join(get_hermes_home(), "update_task.json")
         try:
@@ -3613,10 +3633,13 @@ class CLICommandsMixin:
 
         task_token = str(uuid.uuid4())
 
+        packet_file = os.path.join(get_hermes_home(), f"agy-update-task-{task_token}.md")
+
         state_data = {
             "task_token": task_token,
             "start_time": time.time(),
-            "target": "agy"
+            "target": "agy",
+            "packet_path": packet_file
         }
 
         try:
@@ -3629,19 +3652,69 @@ class CLICommandsMixin:
         except Exception as e:
             print(f"  ✗ Failed to create update task state: {e}")
             return False
-        prompt = (
-            "Execute self-contained update workflow in /home/hermes/.hermes/hermes-agent: "
-            "1. Perform repository checks: cd /home/hermes/.hermes/hermes-agent, verify repository root (git rev-parse --show-toplevel), main branch, and remotes (origin and upstream). "
-            "2. Fetch origin and upstream. "
-            "3. Integrate upstream/main into main, then integrate origin/main if origin advanced. Stop on conflicts and never commit unrelated work. "
-            "4. Run the documented build command (e.g., cd ui-tui && npm run build) and one quick targeted smoke test relevant to the changed code. Do NOT run the full test suite. "
-            "5. After checks, integration, build, and testing, inspect git diff and status. Refuse unrelated pre-existing changes. Stage and commit only the intended update changes to the Hermes repository on main, using a clear conventional commit message. If there are no intended changes, do not create an empty commit. "
-            "6. Before GitHub operations, unset COPILOT_GITHUB_TOKEN only (never use the Copilot token for Git). Do NOT unset GITHUB_TOKEN. Source credentials using 'set -a; source /home/hermes/.hermes/github-highamperage.env; set +a'. Verify the personal token owner through GitHub API and require login 'highamperage' before pushing. "
-            "7. Push the verified commit/state directly to origin main with ordinary 'git push origin main'. Never force-push. If authentication or the push fails, report failure and do not claim success. "
-            "8. Verify origin/main equals HEAD after pushing, and report commit SHA, build result, smoke-test result, and push result. "
-            "9. ONLY after all existing update steps succeed, including verifying origin/main equals HEAD, restart the user systemd Hermes gateway with: systemctl --user restart hermes-gateway. Then verify systemctl --user is-active hermes-gateway returns active and report the restart result. If restart fails, the workflow must end with AGY FAILED, not AGY DONE. "
-            f"10. End with exact success or failure marker on its own line: AGY DONE {task_token} only after successful completion, or AGY FAILED {task_token} if any step fails."
-        )
+
+        packet_content = f"""# Update Task Packet
+
+## Objective
+Execute self-contained update workflow.
+
+## Repository
+/home/hermes/.hermes/hermes-agent
+
+## Settled decisions
+- Perform repository checks: cd /home/hermes/.hermes/hermes-agent, verify repository root (git rev-parse --show-toplevel), main branch, and remotes (origin and upstream).
+- Fetch origin and upstream.
+- Integrate upstream/main into main, then integrate origin/main if origin advanced. Stop on conflicts and never commit unrelated work.
+- Run the documented build command (e.g., cd ui-tui && npm run build) and one quick targeted smoke test relevant to the changed code.
+- Targeted smoke test only — no full test suite unless explicitly authorized.
+- Git identity/token handling exactly as currently described: unset COPILOT_GITHUB_TOKEN only (never use the Copilot token for Git). Do NOT unset GITHUB_TOKEN. Source credentials using 'set -a; source /home/hermes/.hermes/github-highamperage.env; set +a'. Verify the personal token owner through GitHub API and require login 'highamperage' before pushing.
+- Push policy: ordinary git push origin main, never force-push.
+
+## Non-goals
+- Do not expand scope beyond the update workflow.
+- Do not touch unrelated files.
+
+## Stop conditions
+- Merge conflicts.
+- Unrelated pre-existing changes.
+- Failed build/smoke test.
+- Failed push.
+- Failed gateway restart.
+
+## Verification required before claiming success
+- git status clean.
+- No conflict markers.
+- git diff --check.
+- origin/main == HEAD after push.
+
+## Git policy
+Stage and commit only the intended update changes to the Hermes repository on main, using a clear conventional commit message. If there are no intended changes, do not create an empty commit.
+Before GitHub operations, unset COPILOT_GITHUB_TOKEN only. Do NOT unset GITHUB_TOKEN. Source credentials using 'set -a; source /home/hermes/.hermes/github-highamperage.env; set +a'. Verify the personal token owner through GitHub API and require login 'highamperage' before pushing.
+Push directly to origin main with ordinary 'git push origin main'. Never force-push. If authentication or the push fails, report failure and do not claim success.
+Verify origin/main equals HEAD after pushing, and report commit SHA, build result, smoke-test result, and push result.
+
+## Gateway restart
+ONLY after all existing update steps succeed, including verifying origin/main equals HEAD, restart the user systemd Hermes gateway with: `systemctl --user restart hermes-gateway`. Then verify `systemctl --user is-active hermes-gateway` returns active and report the restart result. If restart fails, the workflow must end with AGY FAILED, not AGY DONE.
+
+## Final markers
+End with exact success or failure marker on its own line:
+AGY DONE {task_token}
+or
+AGY FAILED {task_token}
+"""
+        try:
+            fd_pkt = os.open(packet_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd_pkt, "w") as f_pkt:
+                f_pkt.write(packet_content)
+        except Exception as e:
+            print(f"  ✗ Failed to create update task packet: {e}")
+            try:
+                os.remove(state_file)
+            except Exception:
+                pass
+            return False
+
+        prompt = f"Read {packet_file} and execute it as an isolated one-shot task. Do not resume any prior conversation. Work only in /home/hermes/.hermes/hermes-agent."
 
         try:
             # Load prompt into tmux paste buffer
@@ -3653,7 +3726,9 @@ class CLICommandsMixin:
             if load_proc.returncode != 0:
                 err = load_proc.stderr.decode("utf-8", errors="replace").strip()
                 print(f"  ✗ Failed to load tmux paste buffer: {err}")
-                try: os.remove(state_file)
+                try:
+                    os.remove(packet_file)
+                    os.remove(state_file)
                 except: pass
                 return False
 
@@ -3665,7 +3740,9 @@ class CLICommandsMixin:
             if paste_proc.returncode != 0:
                 err = paste_proc.stderr.decode("utf-8", errors="replace").strip()
                 print(f"  ✗ Failed to paste buffer into tmux session 'agy': {err}")
-                try: os.remove(state_file)
+                try:
+                    os.remove(packet_file)
+                    os.remove(state_file)
                 except: pass
                 return False
 
@@ -3677,12 +3754,15 @@ class CLICommandsMixin:
             if send_proc.returncode != 0:
                 err = send_proc.stderr.decode("utf-8", errors="replace").strip()
                 print(f"  ✗ Failed to send key to tmux session 'agy': {err}")
-                try: os.remove(state_file)
+                try:
+                    os.remove(packet_file)
+                    os.remove(state_file)
                 except: pass
                 return False
         except Exception as exc:
             print(f"  ✗ Failed to dispatch to tmux session 'agy': {exc}")
             try:
+                os.remove(packet_file)
                 os.remove(state_file)
             except Exception:
                 pass

@@ -115,6 +115,12 @@ def main():
                 with open(state_file, "r") as f:
                     state = json.load(f)
                 if state.get("task_token") == task_token:
+                    packet_path = state.get("packet_path")
+                    if packet_path and os.path.exists(packet_path):
+                        try:
+                            os.remove(packet_path)
+                        except Exception:
+                            pass
                     os.remove(state_file)
         except Exception:
             pass

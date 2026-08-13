@@ -128,11 +128,15 @@ def test_session_missing_refuses_and_returns_false(capsys):
 
 
 @pytest.mark.parametrize("answer", ["y", "Y", "yes", "YES", "1", "ok"])
-def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, capsys):
+def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, capsys, mock_hermes_home):
     self_ = _make_self(modal_response=answer)
 
-    mock_run = MagicMock()
-    mock_run.return_value = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+    def _mock_run(cmd, **kwargs):
+        if cmd[0:2] == ["tmux", "capture-pane"]:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    mock_run = MagicMock(side_effect=_mock_run)
 
     with (
         patch("hermes_cli.config.is_managed", return_value=False),
@@ -147,31 +151,38 @@ def test_affirmative_answer_dispatches_to_agy_tmux_and_returns_true(answer, caps
     assert "Dispatched update task to tmux session 'agy'" in out
 
     calls = mock_run.call_args_list
-    assert len(calls) == 4
+    assert len(calls) == 5
     assert calls[0][0][0] == ["tmux", "has-session", "-t", "agy"]
-    assert calls[1][0][0] == ["tmux", "load-buffer", "-"]
-    prompt_sent = calls[1][1]["input"].decode("utf-8")
-    assert "Execute self-contained update workflow" in prompt_sent
-    assert "repository checks" in prompt_sent
-    assert "Fetch origin and upstream" in prompt_sent
-    assert "Integrate upstream/main into main" in prompt_sent
-    assert "documented build" in prompt_sent
-    assert "Stage and commit only the intended update changes" in prompt_sent
-    assert "unset COPILOT_GITHUB_TOKEN only" in prompt_sent
-    assert "Do NOT unset GITHUB_TOKEN" in prompt_sent
-    assert "Unset COPILOT_GITHUB_TOKEN and GITHUB_TOKEN" not in prompt_sent
-    assert "github-highamperage.env" in prompt_sent
-    assert "Verify the personal token owner" in prompt_sent
-    assert "require login 'highamperage'" in prompt_sent
-    assert "ordinary 'git push origin main'" in prompt_sent
-    assert "Never force-push" in prompt_sent
-    assert "Verify origin/main equals HEAD after pushing" in prompt_sent
-    assert "systemctl --user restart hermes-gateway" in prompt_sent
-    assert "systemctl --user is-active hermes-gateway returns active" in prompt_sent
-    assert "If restart fails, the workflow must end with AGY FAILED" in prompt_sent
-    assert "AGY DONE" in prompt_sent
-    assert calls[2][0][0] == ["tmux", "paste-buffer", "-t", "agy"]
-    assert calls[3][0][0] == ["tmux", "send-keys", "-t", "agy", "Enter"]
+    assert calls[1][0][0] == ["tmux", "capture-pane", "-p", "-t", "agy"]
+    assert calls[2][0][0] == ["tmux", "load-buffer", "-"]
+    prompt_sent = calls[2][1]["input"].decode("utf-8")
+    assert "Read " in prompt_sent
+    assert "execute it as an isolated one-shot task" in prompt_sent
+
+    packet_files = list(mock_hermes_home.glob("agy-update-task-*.md"))
+    assert len(packet_files) == 1
+    packet_content = packet_files[0].read_text()
+
+    assert "repository checks" in packet_content
+    assert "Fetch origin and upstream" in packet_content
+    assert "Integrate upstream/main into main" in packet_content
+    assert "documented build" in packet_content
+    assert "Stage and commit only the intended update changes" in packet_content
+    assert "unset COPILOT_GITHUB_TOKEN only" in packet_content
+    assert "Do NOT unset GITHUB_TOKEN" in packet_content
+    assert "github-highamperage.env" in packet_content
+    assert "Verify the personal token owner" in packet_content
+    assert "require login 'highamperage'" in packet_content
+    assert "ordinary 'git push origin main'" in packet_content
+    assert "Never force-push" in packet_content
+    assert "Verify origin/main equals HEAD after pushing" in packet_content
+    assert "systemctl --user restart hermes-gateway" in packet_content
+    assert "`systemctl --user is-active hermes-gateway` returns active" in packet_content
+    assert "If restart fails, the workflow must end with AGY FAILED" in packet_content
+    assert "AGY DONE" in packet_content
+
+    assert calls[3][0][0] == ["tmux", "paste-buffer", "-t", "agy"]
+    assert calls[4][0][0] == ["tmux", "send-keys", "-t", "agy", "Enter"]
 
 # ---------------------------------------------------------------------------
 # Cancellation paths — _pending_relaunch must stay None
@@ -195,8 +206,8 @@ def test_negative_answer_cancels(answer, capsys):
     assert self_._pending_relaunch is None
     assert not result
     assert "Dispatched update task" not in capsys.readouterr().out
-    # Only has-session should have been called before confirmation modal
-    assert mock_run.call_count == 1
+    # has-session and capture-pane should have been called before confirmation modal
+    assert mock_run.call_count == 2
 
 
 def test_none_response_cancels(capsys):
@@ -214,7 +225,7 @@ def test_none_response_cancels(capsys):
 
     assert self_._pending_relaunch is None
     assert not result
-    assert mock_run.call_count == 1
+    assert mock_run.call_count == 2
 
 
 @pytest.mark.parametrize("answer", ["nope", "cancel", "sure", "2", "3", "abort", ""])
@@ -233,7 +244,7 @@ def test_unrecognized_or_cancel_input_cancels(answer, capsys):
 
     assert self_._pending_relaunch is None
     assert not result
-    assert mock_run.call_count == 1
+    assert mock_run.call_count == 2
 
 import sys
 import time
@@ -313,8 +324,10 @@ def test_dispatch_failure_aborts_cleanly(capsys, mock_hermes_home):
         assert "fake error" in out
         assert result is False
         mock_popen.assert_not_called()
-        # State file should be removed
+        # State file and packet file should be removed
         assert not (mock_hermes_home / "update_task.json").exists()
+        packet_files = list(mock_hermes_home.glob("agy-update-task-*.md"))
+        assert len(packet_files) == 0
 
 def test_watcher_success(tmp_path, mock_hermes_home):
     tty_path = tmp_path / "tty.log"
