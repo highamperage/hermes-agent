@@ -33,6 +33,18 @@ class AzureFoundryProviderProfile(ProviderProfile):
         if not effective_base:
             return None
 
+        # Claude on Foundry is served under /anthropic, which has no /models
+        # route (404). The resource-level OpenAI v1 catalog lists BOTH the
+        # OpenAI-style and Anthropic-style deployments, so always discover
+        # against /openai/v1 regardless of which wire the active model uses.
+        if re.search(r"/anthropic(/v1(/messages)?)?/?$", effective_base, re.IGNORECASE):
+            effective_base = re.sub(
+                r"/anthropic(/v1(/messages)?)?/?$",
+                "/openai/v1",
+                effective_base,
+                flags=re.IGNORECASE,
+            )
+
         # Correctly form the /models URL for Azure v1 endpoints and legacy ?api-version endpoints, preserving query parameters
         parsed = urllib.parse.urlparse(effective_base)
         clean_path = re.sub(r"/deployments/[^/]+", "", parsed.path).rstrip("/")

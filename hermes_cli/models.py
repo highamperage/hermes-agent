@@ -3100,8 +3100,7 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
                                 merged_lower.add(_model_dedup_key(m))
                         return merged
                     if normalized == "azure-foundry":
-                        allowlist = {"gpt-5.6-terra", "gpt-5.6-luna"}
-                        return [m for m in live if m in allowlist]
+                        return _filter_azure_foundry_models(live)
                     return live
             # Use profile's fallback_models if defined
             if _p.fallback_models:
@@ -3314,9 +3313,22 @@ def _save_provider_models_cache(data: dict) -> None:
 
 
 def _filter_azure_foundry_models(models: list[str]) -> list[str]:
-    """Filter model list for azure-foundry provider to allowlisted models only."""
-    allowlist = {"gpt-5.6-terra", "gpt-5.6-luna"}
-    return [m for m in models if m in allowlist]
+    """Filter the azure-foundry catalog down to this resource's real deployments.
+
+    The resource-level OpenAI v1 ``/models`` endpoint returns the whole
+    Foundry *catalog* (400+ SKUs: dall-e, whisper, ada, davinci, realtime,
+    every Claude and GPT SKU Microsoft offers), NOT an inventory of what is
+    actually deployed here. Listing it wholesale fills the picker with
+    hundreds of names that 404 on first use, so keep an explicit allowlist
+    of the deployments that exist on this resource.
+
+    Claude is served on the ``/anthropic`` route and GPT on ``/openai/v1``;
+    both families must be representable here, which the previous
+    GPT-only two-name allowlist could not do.
+    """
+    allowlist = ("gpt-5.6-terra", "gpt-5.6-luna", "claude-sonnet-5")
+    live = {str(m or "").strip() for m in models}
+    return [m for m in allowlist if m in live]
 
 
 def cached_provider_model_ids(
@@ -4168,6 +4180,57 @@ _AZURE_FOUNDRY_RESPONSES_PREFIXES = (
     "o3",          # o3, o3-mini
     "o4",          # o4, o4-mini
 )
+
+
+def azure_foundry_model_base_url(base_url: Optional[str], model_name: Optional[str]) -> str:
+    """Return the per-model Azure Foundry base URL for *model_name*.
+
+    A single Foundry resource serves two different wire protocols under two
+    different routes on the same host:
+
+      * OpenAI-style models (GPT-5.x, GPT-4o, o-series, …) →
+        ``https://<resource>.<host>/openai/v1``
+      * Anthropic-style models (Claude on Foundry) →
+        ``https://<resource>.<host>/anthropic`` (the Anthropic SDK appends
+        ``/v1/messages`` itself)
+
+    Sharing one configured ``model.base_url`` across both families produces
+    ``404 Requested API is currently not supported`` when the wrong route is
+    used, so derive the route from the model family instead of trusting the
+    stored suffix. The resource root is recovered by stripping any known
+    route suffix from the configured URL, which keeps existing configs
+    working regardless of which family they were last set up for.
+
+    Non-Azure hosts and empty inputs are returned unchanged.
+    """
+    raw = str(base_url or "").strip().rstrip("/")
+    if not raw:
+        return raw
+    if ".azure.com" not in raw.lower():
+        return raw
+
+    root = re.sub(
+        r"/(?:openai(?:/v1)?|anthropic(?:/v1(?:/messages)?)?)/?$",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    ).rstrip("/")
+    if not root:
+        return raw
+
+    if is_anthropic_model_name(model_name):
+        return f"{root}/anthropic"
+    return f"{root}/openai/v1"
+
+
+def is_anthropic_model_name(model_name: Optional[str]) -> bool:
+    """True when *model_name* names a Claude / Anthropic deployment."""
+    raw = str(model_name or "").strip().lower()
+    if not raw:
+        return False
+    if "/" in raw:
+        raw = raw.rsplit("/", 1)[-1]
+    return raw.startswith("claude") or raw.startswith("anthropic.claude")
 
 
 def azure_foundry_model_api_mode(model_name: Optional[str]) -> Optional[str]:

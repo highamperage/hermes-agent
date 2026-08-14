@@ -180,23 +180,33 @@ def test_azure_foundry_entra_mode_failure_clears_api_key(monkeypatch):
 
 
 def test_azure_foundry_allowlist_filtering_filters_many_ids_and_handles_missing(monkeypatch):
-    """Azure Foundry live fetch returns ONLY gpt-5.6-terra and gpt-5.6-luna in live order, filtering un-allowlisted model IDs."""
+    """Live fetch returns only this resource's deployed models, in allowlist order."""
     monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "sk-azure-key")
     monkeypatch.setenv("AZURE_FOUNDRY_BASE_URL", "https://test-resource.openai.azure.com/openai/v1")
 
     profile = get_provider_profile("azure-foundry")
     assert profile is not None
 
-    # Case 1: Endpoint returns many model IDs (e.g. gpt-4o, embeddings, etc.) -> return only gpt-5.6-terra and gpt-5.6-luna in live order
+    # Case 1: the endpoint returns the full Foundry catalog (400+ SKUs incl.
+    # image/embedding models and undeployed Claude/GPT SKUs) -> keep only the
+    # three deployments that exist on this resource.
     with patch.object(
         profile,
         "fetch_models",
-        return_value=["gpt-4o", "gpt-5.6-terra", "text-embedding-3-small", "gpt-5.6-luna", "dall-e-3"],
+        return_value=[
+            "gpt-4o",
+            "gpt-5.6-luna",
+            "text-embedding-3-small",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "gpt-5.6-terra",
+            "dall-e-3",
+        ],
     ):
         result = provider_model_ids("azure-foundry", force_refresh=True)
-        assert result == ["gpt-5.6-terra", "gpt-5.6-luna"]
+        assert result == ["gpt-5.6-terra", "gpt-5.6-luna", "claude-sonnet-5"]
 
-    # Case 2: Endpoint returns only one allowlisted ID (e.g. gpt-5.6-luna) -> return only gpt-5.6-luna
+    # Case 2: only some allowlisted ids present -> return just those.
     with patch.object(
         profile,
         "fetch_models",
@@ -205,9 +215,19 @@ def test_azure_foundry_allowlist_filtering_filters_many_ids_and_handles_missing(
         result = provider_model_ids("azure-foundry", force_refresh=True)
         assert result == ["gpt-5.6-luna"]
 
+    # Case 3: Claude must survive the filter — it is served on the /anthropic
+    # route and the old GPT-only allowlist silently dropped it.
+    with patch.object(
+        profile,
+        "fetch_models",
+        return_value=["claude-sonnet-5", "claude-opus-4-5", "dall-e-3"],
+    ):
+        result = provider_model_ids("azure-foundry", force_refresh=True)
+        assert result == ["claude-sonnet-5"]
+
 
 def test_azure_foundry_provider_model_ids_filters_allowlisted_deployments(monkeypatch):
-    """provider_model_ids('azure-foundry') returns only allowlisted deployments (gpt-5.6-terra and gpt-5.6-luna) from a mixed live response."""
+    """provider_model_ids('azure-foundry') returns only deployed models from a mixed live response."""
     monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "sk-azure-key")
     monkeypatch.setenv("AZURE_FOUNDRY_BASE_URL", "https://test-resource.openai.azure.com/openai/v1")
 
@@ -217,10 +237,10 @@ def test_azure_foundry_provider_model_ids_filters_allowlisted_deployments(monkey
     with patch.object(
         profile,
         "fetch_models",
-        return_value=["gpt-4o", "gpt-5.6-terra", "text-embedding-3-small", "gpt-5.6-luna", "dall-e-3"],
+        return_value=["gpt-4o", "claude-sonnet-5", "text-embedding-3-small", "gpt-5.6-luna", "dall-e-3"],
     ) as mock_fetch:
         result = provider_model_ids("azure-foundry", force_refresh=True)
-        assert result == ["gpt-5.6-terra", "gpt-5.6-luna"]
+        assert result == ["gpt-5.6-luna", "claude-sonnet-5"]
         mock_fetch.assert_called_once_with(
             api_key="sk-azure-key",
             base_url="https://test-resource.openai.azure.com/openai/v1",
@@ -301,7 +321,7 @@ def test_cached_provider_model_ids_filters_fresh_disk_cache_for_azure_foundry(mo
             "at": time.time(),
             "models": [
                 "gpt-4o",
-                "gpt-5.6-terra",
+                "claude-sonnet-5",
                 "text-embedding-3-small",
                 "gpt-5.6-luna",
                 "dall-e-3",
@@ -312,4 +332,4 @@ def test_cached_provider_model_ids_filters_fresh_disk_cache_for_azure_foundry(mo
     cache_file.write_text(json.dumps(pre_fix_cache), encoding="utf-8")
 
     result = cached_provider_model_ids("azure-foundry", force_refresh=False)
-    assert result == ["gpt-5.6-terra", "gpt-5.6-luna"]
+    assert result == ["gpt-5.6-luna", "claude-sonnet-5"]

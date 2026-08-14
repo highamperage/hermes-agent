@@ -514,6 +514,20 @@ def _resolve_runtime_from_pool_entry(
             configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
             if configured_mode:
                 api_mode = configured_mode
+        # Claude on Foundry always speaks the native Messages protocol; other
+        # deployments must never inherit anthropic_messages from a config left
+        # over from a Claude session.
+        if effective_model:
+            try:
+                from hermes_cli.models import is_anthropic_model_name
+
+                _is_claude = is_anthropic_model_name(effective_model)
+            except Exception:
+                _is_claude = False
+            if _is_claude:
+                api_mode = "anthropic_messages"
+            elif api_mode == "anthropic_messages":
+                api_mode = "chat_completions"
         # Model-family inference for GPT-5.x / codex / o1-o4: Azure rejects
         # /chat/completions on these with 400 "operation unsupported" — see
         # azure_foundry_model_api_mode() for rationale.  Skip when the user
@@ -527,6 +541,15 @@ def _resolve_runtime_from_pool_entry(
                 inferred = None
             if inferred:
                 api_mode = inferred
+        # One Foundry resource serves OpenAI-style models under /openai/v1 and
+        # Claude under /anthropic — pick the route from the model family.
+        if effective_model and base_url:
+            try:
+                from hermes_cli.models import azure_foundry_model_base_url
+
+                base_url = azure_foundry_model_base_url(base_url, effective_model)
+            except Exception:
+                pass
         # For Anthropic-style endpoints, strip /v1 suffix
         if api_mode == "anthropic_messages":
             base_url = re.sub(r"/v1/?$", "", base_url)
@@ -1368,6 +1391,20 @@ def _resolve_azure_foundry_runtime(
     # Upgrade api_mode when the model name matches, unless the user has
     # explicitly chosen anthropic_messages (Anthropic-style endpoint).
     effective_model = str(target_model or model_cfg.get("default") or "").strip()
+    if effective_model:
+        try:
+            from hermes_cli.models import is_anthropic_model_name
+
+            _is_claude = is_anthropic_model_name(effective_model)
+        except Exception:
+            _is_claude = False
+        # Claude deployments always speak the native Messages protocol, and a
+        # non-Claude deployment must never inherit anthropic_messages from a
+        # config left over from a Claude session.
+        if _is_claude:
+            cfg_api_mode = "anthropic_messages"
+        elif cfg_api_mode == "anthropic_messages":
+            cfg_api_mode = "chat_completions"
     if effective_model and cfg_api_mode != "anthropic_messages":
         try:
             from hermes_cli.models import azure_foundry_model_api_mode
@@ -1385,6 +1422,18 @@ def _resolve_azure_foundry_runtime(
             "Azure Foundry requires a base URL. Set it via 'hermes model' or "
             "the AZURE_FOUNDRY_BASE_URL environment variable."
         )
+
+    # One Foundry resource serves OpenAI-style models under /openai/v1 and
+    # Claude under /anthropic.  Derive the route from the model family so a
+    # single configured base_url works for both, instead of 404-ing whichever
+    # family the stored suffix does not match.
+    if effective_model:
+        try:
+            from hermes_cli.models import azure_foundry_model_base_url
+
+            base_url = azure_foundry_model_base_url(base_url, effective_model)
+        except Exception:
+            pass
 
     # Anthropic SDK appends /v1/messages itself, so strip any trailing /v1
     # we inherited from the configured base_url to avoid double-/v1 paths.
