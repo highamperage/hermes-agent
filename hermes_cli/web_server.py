@@ -14514,64 +14514,60 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
                 "aux_task": aux.get("task") or "",
             })
 
-        # Session rows can be created before the first billable provider call
-        # finishes. If that early row records only the model name, and a later
-        # row for the same model has real accounting + billing_provider, the
-        # Models page used to show a duplicate "0 tokens / — API calls" card
-        # next to the real provider card. Fold those session-only rows into
-        # the single accounted provider row when the ownership is unambiguous.
+        # Combine all rows for the same model name, regardless of provider, base URL,
+        # or task. Sum all accounting fields, take the max last_used_at, and choose
+        # the provider with the greatest combined token volume, preferring non-empty on a tie.
         rows_by_model: Dict[str, List[Dict[str, Any]]] = {}
         for row in raw_rows:
             rows_by_model.setdefault(row.get("model") or "", []).append(row)
 
         rows: List[Dict[str, Any]] = []
-        for model_rows in rows_by_model.values():
-            provider_rows = [r for r in model_rows if r.get("billing_provider")]
-            if len(provider_rows) == 1:
-                target = provider_rows[0]
-                for row in model_rows:
-                    if row is target or row.get("billing_provider"):
-                        continue
-                    has_usage = any(
-                        (row.get(key) or 0) != 0
-                        for key in (
-                            "input_tokens",
-                            "output_tokens",
-                            "cache_read_tokens",
-                            "reasoning_tokens",
-                            "estimated_cost",
-                            "actual_cost",
-                            "api_calls",
-                            "tool_calls",
-                        )
-                    )
-                    if has_usage:
-                        continue
-                    target["sessions"] = (target.get("sessions") or 0) + (row.get("sessions") or 0)
-                    target["last_used_at"] = max(target.get("last_used_at") or 0, row.get("last_used_at") or 0)
-                    total_tokens = (target.get("input_tokens") or 0) + (target.get("output_tokens") or 0)
-                    sessions = target.get("sessions") or 0
-                    target["avg_tokens_per_session"] = total_tokens / sessions if sessions else 0
-                rows.append(target)
-                rows.extend(
-                    r for r in model_rows
-                    if r is not target
-                    and (r.get("billing_provider") or any(
-                        (r.get(key) or 0) != 0
-                        for key in (
-                            "input_tokens",
-                            "output_tokens",
-                            "cache_read_tokens",
-                            "reasoning_tokens",
-                            "estimated_cost",
-                            "actual_cost",
-                            "api_calls",
-                            "tool_calls",
-                        )
-                    ))
-                )
-            else:
-                rows.extend(model_rows)
+        for model_name, model_rows in rows_by_model.items():
+            if not model_rows:
+                continue
+            merged = {
+                "model": model_name,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "reasoning_tokens": 0,
+                "estimated_cost": 0.0,
+                "actual_cost": 0.0,
+                "sessions": 0,
+                "api_calls": 0,
+                "tool_calls": 0,
+                "last_used_at": 0,
+            }
+            best_provider = ""
+            best_provider_tokens = -1
+
+            for r in model_rows:
+                merged["input_tokens"] += r.get("input_tokens") or 0
+                merged["output_tokens"] += r.get("output_tokens") or 0
+                merged["cache_read_tokens"] += r.get("cache_read_tokens") or 0
+                merged["reasoning_tokens"] += r.get("reasoning_tokens") or 0
+                merged["estimated_cost"] += r.get("estimated_cost") or 0.0
+                merged["actual_cost"] += r.get("actual_cost") or 0.0
+                merged["sessions"] += r.get("sessions") or 0
+                merged["api_calls"] += r.get("api_calls") or 0
+                merged["tool_calls"] += r.get("tool_calls") or 0
+
+                lu = r.get("last_used_at") or 0
+                if lu > merged["last_used_at"]:
+                    merged["last_used_at"] = lu
+
+                p = r.get("billing_provider") or ""
+                t = (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0)
+                if t > best_provider_tokens:
+                    best_provider = p
+                    best_provider_tokens = t
+                elif t == best_provider_tokens and p and not best_provider:
+                    best_provider = p
+
+            merged["billing_provider"] = best_provider
+            total_tokens = merged["input_tokens"] + merged["output_tokens"]
+            merged["avg_tokens_per_session"] = total_tokens / merged["sessions"] if merged["sessions"] else 0
+            rows.append(merged)
 
         rows.sort(
             key=lambda r: (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0),
