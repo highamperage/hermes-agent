@@ -188,6 +188,7 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "perplexity": "perplexity",
     "cohere": "cohere",
     "ollama-cloud": "ollama-cloud",
+    "azure-foundry": "azure-cognitive-services",
 }
 
 # Reverse mapping: models.dev → Hermes (built lazily)
