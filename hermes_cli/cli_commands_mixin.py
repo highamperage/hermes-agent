@@ -3523,11 +3523,10 @@ class CLICommandsMixin:
         run_debug_share(args)
 
     def _handle_update_command(self) -> bool:
-        """Handle /update — dispatch self-contained update workflow to tmux session 'agy'.
+        """Handle /update — dispatch self-contained update workflow to a dedicated AGY tmux session.
 
-        Checks that the interactive tmux session 'agy' exists, prompts for user
-        confirmation, and dispatches the AGY update prompt via tmux paste-buffer.
-        Exits the current Hermes CLI session cleanly without launching `hermes update`.
+        Creates a unique tmux session, prompts for user confirmation, and dispatches the AGY
+        update prompt via tmux paste-buffer. Exits the current Hermes CLI session cleanly.
 
         Returns ``True`` when the update task was confirmed and dispatched (caller
         triggers CLI session exit). Returns ``False`` when cancelled or on error.
@@ -3544,83 +3543,15 @@ class CLICommandsMixin:
             print(f"  ✗ {format_managed_message('update Hermes Agent')}")
             return False
 
-        # Verify interactive tmux session 'agy' exists
-        try:
-            has_session = subprocess.run(
-                ["tmux", "has-session", "-t", "agy"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            if has_session.returncode != 0:
-                print("  ✗ tmux session 'agy' not found. Please start an interactive tmux session named 'agy'.")
-                return False
-        except FileNotFoundError:
-            print("  ✗ tmux is not installed or not available in PATH.")
-            return False
-
-        # Busy-pane safety check
-        try:
-            cap_busy = subprocess.run(["tmux", "capture-pane", "-p", "-t", "agy"], capture_output=True)
-            if cap_busy.returncode == 0:
-                pane_text = cap_busy.stdout.decode("utf-8", errors="replace")
-                busy_indicators = [
-                    "Generating...",
-                    "Thinking...",
-                    "Queued:",
-                    "[Queued]",
-                    "Working...",
-                    "Executing task",
-                    "⚙"
-                ]
-                if any(ind in pane_text for ind in busy_indicators):
-                    print("  ✗ tmux session 'agy' appears busy (found generation or queued indicators).")
-                    return False
-        except Exception:
-            pass
-
-        # Check for active update state
-        state_file = os.path.join(get_hermes_home(), "update_task.json")
-        try:
-            if os.path.exists(state_file):
-                with open(state_file, "r") as f:
-                    state = json.load(f)
-
-                is_stale = False
-                if time.time() - state.get("start_time", 0) > 3600:
-                    is_stale = True
-                else:
-                    cap = subprocess.run(["tmux", "capture-pane", "-p", "-t", "agy"], capture_output=True)
-                    pane_text = cap.stdout.decode("utf-8", errors="replace").splitlines() if cap.returncode == 0 else []
-                    found_terminal = any(
-                        line.strip() == f"AGY DONE {state.get('task_token')}" or
-                        line.strip() == f"AGY FAILED {state.get('task_token')}"
-                        for line in pane_text
-                    )
-                    if found_terminal or cap.returncode != 0:
-                        is_stale = True
-
-                if not is_stale:
-                    print("  ✗ An update task is already active. Please wait for it to complete.")
-                    return False
-                else:
-                    try:
-                        os.remove(state_file)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
         # Use the prompt_toolkit-native modal so the confirmation panel
-        # renders properly above the composer and avoids raw input() races
-        # with the prompt_toolkit event loop (same pattern as
-        # _confirm_destructive_slash).
+        # renders properly above the composer and avoids raw input() races.
         choices = [
-            ("once", "Update Now", "dispatch update task to tmux session 'agy' and exit"),
+            ("once", "Update Now", "dispatch update task to a dedicated AGY tmux session and exit"),
             ("cancel", "Cancel", "keep the current session"),
         ]
         raw = self._prompt_text_input_modal(
             title="⚕  Update Hermes Agent via AGY",
-            detail="This will dispatch a self-contained update task to tmux session 'agy' and exit this session.",
+            detail="This will create a dedicated AGY session for the update task and exit this session.",
             choices=choices,
         )
         if raw is None:
@@ -3632,13 +3563,58 @@ class CLICommandsMixin:
             return False
 
         task_token = str(uuid.uuid4())
+        tmux_target = f"agy-update-{task_token[:12]}"
 
         packet_file = os.path.join(get_hermes_home(), f"agy-update-task-{task_token}.md")
+        state_file = os.path.join(get_hermes_home(), "update_task.json")
+
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, "r") as f:
+                    state = json.load(f)
+
+                is_stale = False
+                tracked_target = state.get("tmux_target", state.get("target", "agy"))
+
+                if time.time() - state.get("start_time", 0) > 3600:
+                    is_stale = True
+                else:
+                    has_session = subprocess.run(
+                        ["tmux", "has-session", "-t", tracked_target],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    if has_session.returncode != 0:
+                        is_stale = True
+                    else:
+                        tracked_token = state.get("task_token", "")
+                        cap = subprocess.run(
+                            ["tmux", "capture-pane", "-p", "-t", tracked_target, "-S", "-200"],
+                            capture_output=True
+                        )
+                        if cap.returncode == 0:
+                            lines = cap.stdout.decode("utf-8", errors="replace")
+                            if f"AGY DONE {tracked_token}" in lines or f"AGY FAILED {tracked_token}" in lines:
+                                is_stale = True
+
+                if is_stale:
+                    tracked_packet = state.get("packet_path")
+                    if tracked_packet and os.path.exists(tracked_packet):
+                        try:
+                            os.remove(tracked_packet)
+                        except Exception:
+                            pass
+                    os.remove(state_file)
+                else:
+                    print("  ✗ An update task is already running in the background.")
+                    return False
+            except Exception:
+                pass
 
         state_data = {
             "task_token": task_token,
             "start_time": time.time(),
-            "target": "agy",
+            "tmux_target": tmux_target,
             "packet_path": packet_file
         }
 
@@ -3714,7 +3690,33 @@ AGY FAILED {task_token}
                 pass
             return False
 
-        prompt = f"Read {packet_file} and execute it as an isolated one-shot task. Do not resume any prior conversation. Work only in /home/hermes/.hermes/hermes-agent."
+        # Start detached tmux session with cwd /home/hermes/.hermes/hermes-agent
+        cmd = "agy --model gemini-3.1-pro-high --effort high --mode accept-edits --dangerously-skip-permissions"
+        start_proc = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", tmux_target, "-c", "/home/hermes/.hermes/hermes-agent", cmd],
+            capture_output=True
+        )
+
+        time.sleep(1)
+
+        has_session = subprocess.run(
+            ["tmux", "has-session", "-t", tmux_target],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        if has_session.returncode != 0:
+            print(f"  ✗ Failed to create dedicated tmux session '{tmux_target}'.")
+            if start_proc.stderr:
+                print(f"    {start_proc.stderr.decode('utf-8', errors='replace').strip()}")
+            try:
+                os.remove(packet_file)
+                os.remove(state_file)
+            except Exception:
+                pass
+            return False
+
+        prompt = f"Read {packet_file} and execute it as an isolated one-shot task. Do not resume any prior conversation. Finish exactly with the tokenized marker. Work only in /home/hermes/.hermes/hermes-agent."
 
         try:
             # Load prompt into tmux paste buffer
@@ -3734,12 +3736,12 @@ AGY FAILED {task_token}
 
             # Paste buffer into agy session
             paste_proc = subprocess.run(
-                ["tmux", "paste-buffer", "-t", "agy"],
+                ["tmux", "paste-buffer", "-t", tmux_target],
                 capture_output=True,
             )
             if paste_proc.returncode != 0:
                 err = paste_proc.stderr.decode("utf-8", errors="replace").strip()
-                print(f"  ✗ Failed to paste buffer into tmux session 'agy': {err}")
+                print(f"  ✗ Failed to paste buffer into tmux session '{tmux_target}': {err}")
                 try:
                     os.remove(packet_file)
                     os.remove(state_file)
@@ -3748,19 +3750,19 @@ AGY FAILED {task_token}
 
             # Send Enter keypress
             send_proc = subprocess.run(
-                ["tmux", "send-keys", "-t", "agy", "Enter"],
+                ["tmux", "send-keys", "-t", tmux_target, "Enter"],
                 capture_output=True,
             )
             if send_proc.returncode != 0:
                 err = send_proc.stderr.decode("utf-8", errors="replace").strip()
-                print(f"  ✗ Failed to send key to tmux session 'agy': {err}")
+                print(f"  ✗ Failed to send key to tmux session '{tmux_target}': {err}")
                 try:
                     os.remove(packet_file)
                     os.remove(state_file)
                 except: pass
                 return False
         except Exception as exc:
-            print(f"  ✗ Failed to dispatch to tmux session 'agy': {exc}")
+            print(f"  ✗ Failed to dispatch to tmux session '{tmux_target}': {exc}")
             try:
                 os.remove(packet_file)
                 os.remove(state_file)
@@ -3769,7 +3771,7 @@ AGY FAILED {task_token}
             return False
 
         print()
-        print("  ⚕ Dispatched update task to tmux session 'agy'. Exiting session...")
+        print(f"  ⚕ Dispatched update task to dedicated tmux session '{tmux_target}'. Exiting session...")
         print()
 
         try:
@@ -3787,7 +3789,7 @@ AGY FAILED {task_token}
                 watcher_script = os.path.join(os.path.dirname(__file__), "agy_watcher.py")
                 if os.path.exists(watcher_script):
                     subprocess.Popen(
-                        [sys.executable, watcher_script, tty_path, task_token],
+                        [sys.executable, watcher_script, tty_path, task_token, tmux_target],
                         start_new_session=True,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
@@ -3798,7 +3800,6 @@ AGY FAILED {task_token}
             pass
 
         return True
-
     def _handle_voice_command(self, command: str):
         """Handle /voice [on|off|tts|status] command."""
         from cli import _cprint

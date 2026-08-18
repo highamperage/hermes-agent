@@ -1,4 +1,4 @@
-"""Background watcher to poll tmux 'agy' session for update progress.
+"""Background watcher to poll a tmux session for update progress.
 Launched by /update command."""
 
 import sys
@@ -14,6 +14,7 @@ def main():
 
     tty_path = sys.argv[1]
     task_token = sys.argv[2] if len(sys.argv) > 2 else ""
+    tmux_target = sys.argv[3] if len(sys.argv) > 3 else "agy"
 
     def _write(msg):
         try:
@@ -25,7 +26,7 @@ def main():
     state_file = os.path.join(get_hermes_home(), "update_task.json")
 
     time.sleep(1)
-    _write("\n  [Watcher] Polling AGY update progress...")
+    _write(f"\n  [Watcher] Polling AGY update progress in tmux '{tmux_target}'...")
 
     is_first_capture = True
     seen_lines = set()
@@ -36,30 +37,45 @@ def main():
     expected_done = f"AGY DONE {task_token}"
     expected_failed = f"AGY FAILED {task_token}"
 
+    def is_safe_line(line):
+        if line == expected_done or line == expected_failed:
+            return True
+        if line.startswith("▸ Thought "):
+            return True
+        if any(line.startswith(prefix) for prefix in [
+            "● Read(", "● Edit(", "● Write(", "● Bash(", "● Search(", "● Glob(", "● Task("
+        ]):
+            return True
+        if line in ["Generating...", "Thinking..."]:
+            return True
+        if any(marker in line.lower() for marker in ["quota exceeded", "rate limit exceeded", "resource_exhausted", "429", "try again in", "retry after", "daily quota"]):
+            return True
+        return False
+
     try:
         while True:
             if time.time() - start_time > TIMEOUT:
-                _write("  [Watcher] ✗ Timeout exceeded. Stopping watcher.")
+                _write(f"  [Watcher] ✗ Timeout exceeded. Stopping watcher ({tmux_target}).")
                 break
 
             has_session = subprocess.run(
-                ["tmux", "has-session", "-t", "agy"],
+                ["tmux", "has-session", "-t", tmux_target],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             if has_session.returncode != 0:
-                _write("  [Watcher] ✗ tmux session 'agy' disappeared or failed. Update status unknown.")
+                _write(f"  [Watcher] ✗ tmux session '{tmux_target}' disappeared or failed. Update status unknown.")
                 break
 
             cap = subprocess.run(
-                ["tmux", "capture-pane", "-p", "-t", "agy"],
+                ["tmux", "capture-pane", "-p", "-t", tmux_target, "-S", "-200"],
                 capture_output=True
             )
 
             if cap.returncode != 0:
                 consecutive_errors += 1
                 if consecutive_errors > 3:
-                    _write("  [Watcher] ✗ Failed to capture tmux pane. Stopping watcher.")
+                    _write(f"  [Watcher] ✗ Failed to capture tmux pane '{tmux_target}'. Stopping watcher.")
                     break
                 time.sleep(2)
                 continue
@@ -91,10 +107,6 @@ def main():
 
                 seen_lines.add(sline)
 
-                # Exclude the very long prompt line
-                if "Execute self-contained update workflow in" in sline:
-                    continue
-
                 if sline == expected_done:
                     _write(f"  [AGY] {sline}")
                     _write("  [Watcher] ✓ Update workflow completed.")
@@ -104,7 +116,8 @@ def main():
                     _write("  [Watcher] ✗ Update workflow failed.")
                     return
 
-                _write(f"  [AGY] {sline}")
+                if is_safe_line(sline):
+                    _write(f"  [AGY] {sline}")
 
             time.sleep(2)
     except Exception as e:
