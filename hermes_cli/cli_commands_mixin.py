@@ -3857,18 +3857,29 @@ AGY FAILED {task_token}
             capture_output=True
         )
 
-        time.sleep(1)
+        session_ready = False
+        for _ in range(10):
+            has_session = subprocess.run(
+                ["tmux", "has-session", "-t", tmux_target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if has_session.returncode == 0:
+                session_ready = True
+                break
+            time.sleep(0.5)
 
-        has_session = subprocess.run(
-            ["tmux", "has-session", "-t", tmux_target],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        if has_session.returncode != 0:
+        if not session_ready:
             print(f"  ✗ Failed to create dedicated tmux session '{tmux_target}'.")
             if start_proc.stderr:
-                print(f"    {start_proc.stderr.decode('utf-8', errors='replace').strip()}")
+                print(f"    Launcher stderr: {start_proc.stderr.decode('utf-8', errors='replace').strip()}")
+
+            diag = subprocess.run(["tmux", "capture-pane", "-p", "-t", tmux_target], capture_output=True)
+            if diag.returncode == 0 and diag.stdout.strip():
+                print(f"    Tmux pane: {diag.stdout.decode('utf-8', errors='replace').strip()}")
+            elif start_proc.stdout:
+                print(f"    Launcher stdout: {start_proc.stdout.decode('utf-8', errors='replace').strip()}")
+
             try:
                 os.remove(packet_file)
                 os.remove(state_file)
