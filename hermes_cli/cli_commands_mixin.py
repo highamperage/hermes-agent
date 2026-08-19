@@ -3696,6 +3696,8 @@ class CLICommandsMixin:
         import json
         import time
         import uuid
+        import shutil
+        import shlex
         from hermes_cli.config import is_managed, format_managed_message
         from hermes_constants import get_hermes_home
 
@@ -3850,8 +3852,23 @@ AGY FAILED {task_token}
                 pass
             return False
 
+        agy_path = shutil.which("agy")
+        if not agy_path:
+            local_bin_agy = os.path.expanduser("~/.local/bin/agy")
+            if os.path.exists(local_bin_agy) and os.access(local_bin_agy, os.X_OK):
+                agy_path = local_bin_agy
+
+        if not agy_path:
+            print("  ✗ AGY executable not found in PATH or ~/.local/bin/agy.")
+            try:
+                os.remove(packet_file)
+                os.remove(state_file)
+            except Exception:
+                pass
+            return False
+
         # Start detached tmux session with cwd /home/hermes/.hermes/hermes-agent
-        cmd = "agy --model gemini-3.1-pro-high --effort high --mode accept-edits --dangerously-skip-permissions"
+        cmd = f"{shlex.quote(agy_path)} --model gemini-3.1-pro-high --effort high --mode accept-edits --dangerously-skip-permissions"
         start_proc = subprocess.run(
             ["tmux", "new-session", "-d", "-s", tmux_target, "-c", "/home/hermes/.hermes/hermes-agent", cmd],
             capture_output=True
