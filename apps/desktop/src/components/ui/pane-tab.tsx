@@ -53,7 +53,10 @@ interface PaneTabProps extends React.ComponentProps<'div'> {
   dirty?: boolean
   /** Close verb. Horizontal tabs reveal a hover ✕ on the right (a `--tab-face`
    *  gradient fades it over the label); middle-click and ⌘-click always work,
-   *  and stay the only gestures on vertical rails (no room for a chip ✕). */
+   *  and stay the only gestures on vertical rails (no room for a chip ✕).
+   *  There is no way to take the ✕ off a tab that HAS this verb: the chip and
+   *  the pointer gestures are one affordance, so a closeable tab always says
+   *  so. Omit `onClose` to make a tab uncloseable. */
   onClose?: () => void
   /** Part of a multi-tab selection (⌥/Ctrl-click, Shift-click) — an accent
    *  wash marks every tab that a drag would carry, Chrome-style. */
