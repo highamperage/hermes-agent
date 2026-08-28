@@ -71,10 +71,10 @@ class TestApplyWalWalResetGate:
         assert any("instead of enabling WAL" in r.getMessage() for r in caplog.records)
         conn.close()
 
-    def test_existing_wal_left_alone_when_vulnerable(
-        self, tmp_path, monkeypatch, caplog
+    def test_existing_wal_fails_closed_when_vulnerable(
+        self, tmp_path, monkeypatch
     ):
-        """Already-WAL DBs must not be live-downgraded under concurrent openers."""
+        """Already-WAL DBs must fail closed instead of live-downgrading under concurrent openers."""
         monkeypatch.setattr(
             hermes_state, "is_sqlite_wal_reset_vulnerable", lambda version_info=None: True
         )
@@ -91,16 +91,10 @@ class TestApplyWalWalResetGate:
 
         conn = sqlite3.connect(str(path), timeout=30.0)
         try:
-            with caplog.at_level("WARNING", logger="hermes_state"):
-                mode = apply_wal_with_fallback(conn, db_label="prior_wal.db")
-            assert mode == "wal"
+            with pytest.raises(hermes_state.WalUnsupportedError, match="is already in WAL mode"):
+                apply_wal_with_fallback(conn, db_label="prior_wal.db")
             assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
             assert conn.execute("SELECT x FROM t").fetchone()[0] == 42
-            assert any("already in WAL mode" in r.getMessage() for r in caplog.records)
-            # Must not attempt a live journal_mode flip.
-            assert not any(
-                "instead of enabling WAL" in r.getMessage() for r in caplog.records
-            )
         finally:
             conn.close()
 
@@ -175,11 +169,10 @@ class TestNoDowngradeUnderConcurrentOpeners:
 
             conn = sqlite3.connect(str(db), timeout=30.0)
             try:
-                with caplog.at_level("WARNING", logger="hermes_state"):
-                    mode = apply_wal_with_fallback(conn, db_label="live_wal.db")
+                with pytest.raises(hermes_state.WalUnsupportedError, match="is already in WAL mode"):
+                    apply_wal_with_fallback(conn, db_label="live_wal.db")
                 # Asserted while the second opener still holds the DB:
                 assert holder.poll() is None, "holder must still be alive here"
-                assert mode == "wal"
                 assert (
                     conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
                     == "wal"
@@ -187,10 +180,6 @@ class TestNoDowngradeUnderConcurrentOpeners:
                 # The concurrent opener's committed row must have survived.
                 rows = {r[0] for r in conn.execute("SELECT x FROM t")}
                 assert rows == {1, 777}
-                assert not any(
-                    "instead of enabling WAL" in r.getMessage()
-                    for r in caplog.records
-                )
             finally:
                 conn.close()
         finally:
@@ -204,15 +193,14 @@ class TestNoDowngradeUnderConcurrentOpeners:
         finally:
             check.close()
 
-    def test_unreadable_mode_keeps_journal_mode_when_vulnerable(
-        self, tmp_path, monkeypatch, caplog
+    def test_unreadable_mode_fails_closed_when_vulnerable(
+        self, tmp_path, monkeypatch
     ):
         """An exclusive-locking holder blocks even the journal-mode read.
 
-        Ownership is then not provably exclusive: the gate must leave the
-        journal mode untouched instead of treating 'could not read the mode'
-        as 'not WAL' and flipping anyway (the incident's exact confusion).
-        Assertions run WHILE the holder's exclusive lock is live."""
+        Ownership is then not provably exclusive: the gate must fail closed
+        instead of treating 'could not read the mode' as 'not WAL' and flipping anyway
+        (the incident's exact confusion). Assertions run WHILE the holder's exclusive lock is live."""
         monkeypatch.setattr(
             hermes_state, "is_sqlite_wal_reset_vulnerable", lambda version_info=None: True
         )
@@ -237,16 +225,8 @@ class TestNoDowngradeUnderConcurrentOpeners:
                 # Sanity: the probe really is blocked right now.
                 with pytest.raises(sqlite3.OperationalError):
                     conn.execute("PRAGMA journal_mode").fetchone()
-                with caplog.at_level("WARNING", logger="hermes_state"):
-                    mode = apply_wal_with_fallback(conn, db_label="locked_wal.db")
-                assert mode == "wal"
-                assert any(
-                    "concurrent openers" in r.getMessage() for r in caplog.records
-                )
-                assert not any(
-                    "instead of enabling WAL" in r.getMessage()
-                    for r in caplog.records
-                )
+                with pytest.raises(hermes_state.WalUnsupportedError, match="cannot be verified"):
+                    apply_wal_with_fallback(conn, db_label="locked_wal.db")
             finally:
                 conn.close()
         finally:
