@@ -1367,33 +1367,20 @@ def _apply_delete_for_wal_reset_bug(
     current = _on_disk_journal_mode(conn)
 
     if current == "wal":
-        _log_wal_reset_bug_once(db_label, kept_wal=True)
-        if require_delete:
-            # The vulnerability warning above suggests upgrading SQLite, which
-            # does not help on a WAL-incompatible filesystem; surface that the
-            # configured delete is not in effect (see _log_configured_delete_overridden_once).
-            # Emitted last so the actionable message is the final one in the log.
-            _log_configured_delete_overridden_once(db_label)
-        # Do not TRUNCATE / journal_mode=DELETE while other processes may
-        # still hold this WAL DB open; same safety rule as the NFS path.
-        _apply_wal_size_limit(conn)
-        _apply_macos_checkpoint_barrier(conn)
-        _enforce_macos_synchronous_full(conn)
-        return "wal"
+        repair_hint = _wal_reset_repair_hint()
+        raise WalUnsupportedError(
+            f"{db_label}: linked SQLite {sqlite3.sqlite_version} is vulnerable to the WAL-reset "
+            f"corruption bug. The database is already in WAL mode, and live downgrade "
+            f"under concurrent openers is unsafe. {repair_hint}."
+        )
 
     if current is None:
-        # The mode probe itself failed — another opener's locks are the
-        # most likely cause, and the DB may well be in WAL under a live
-        # writer.  Never flip a journal mode we cannot even read.
-        if require_delete:
-            raise sqlite3.OperationalError(
-                "could not verify journal mode before applying configured "
-                "journal_mode=delete (database is locked — possible "
-                "concurrent openers); refusing to downgrade a database "
-                "this process does not exclusively own"
-            )
-        _log_wal_reset_bug_once(db_label, kept_wal=True, indeterminate=True)
-        return "wal"
+        repair_hint = _wal_reset_repair_hint()
+        raise WalUnsupportedError(
+            f"{db_label}: linked SQLite {sqlite3.sqlite_version} is vulnerable to the WAL-reset "
+            f"corruption bug. The database journal mode cannot be verified (database is locked), "
+            f"and live downgrade under concurrent openers is unsafe. {repair_hint}."
+        )
 
     actual = ""
     try:

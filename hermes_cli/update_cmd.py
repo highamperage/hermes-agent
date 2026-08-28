@@ -2251,6 +2251,150 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
         logger.debug("Update receipt finalize (zip path) failed: %s", _receipt_exc)
     return desktop_build_ok
 
+def _commit_and_push_local_changes_if_needed(git_cmd: list[str], cwd: Path, branch: str) -> None:
+    status = subprocess.run(
+        git_cmd + ["status", "--porcelain"],
+        cwd=cwd,
+        capture_output=True,
+        text=True, encoding="utf-8", errors="replace",
+        check=True,
+    )
+    if not status.stdout.strip():
+        return None
+
+    # If the index has unmerged entries (e.g. from an interrupted merge/rebase),
+    # commit will fail. Clear the conflict state with `git reset` first.
+    unmerged = subprocess.run(
+        git_cmd + ["ls-files", "--unmerged"],
+        cwd=cwd,
+        capture_output=True,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    if unmerged.stdout.strip():
+        print("→ Clearing unmerged index entries from a previous conflict...")
+        subprocess.run(git_cmd + ["reset"], cwd=cwd, capture_output=True)
+
+    from datetime import datetime, timezone
+
+    subprocess.run(git_cmd + ["add", "-A"], cwd=cwd, capture_output=True)
+
+    staged = subprocess.run(
+        git_cmd + ["status", "--porcelain"],
+        cwd=cwd,
+        capture_output=True,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    if not staged.stdout.strip():
+        return None
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    commit_msg = f"chore: auto-commit before hermes update ({timestamp})"
+    print("→ Local changes detected — committing before update...")
+
+    commit_res = subprocess.run(
+        git_cmd + ["commit", "-m", commit_msg],
+        cwd=cwd,
+        capture_output=True,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    if commit_res.returncode != 0:
+        print(f"✗ Update failed: Auto-commit failed: {commit_res.stderr.strip()}")
+        return False
+
+    track_check = subprocess.run(
+        git_cmd + ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        cwd=cwd,
+        capture_output=True,
+        text=True, encoding="utf-8", errors="replace",
+    )
+
+    push_args = ["push", "origin", branch]
+    if track_check.returncode != 0:
+        push_args = ["push", "-u", "origin", branch]
+
+    print(f"→ Pushing auto-commit to origin/{branch}...")
+
+    env_file = Path("/home/hermes/.hermes/github-highamperage.env")
+    push_env = os.environ.copy()
+    push_env.pop("COPILOT_GITHUB_TOKEN", None)
+    push_env["GIT_TERMINAL_PROMPT"] = "0"
+    push_env["GIT_ASKPASS"] = "echo"
+
+    github_token = None
+    github_username = None
+    if env_file.exists():
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k == "GITHUB_TOKEN":
+                        github_token = v
+                    elif k == "GITHUB_USERNAME":
+                        github_username = v
+
+    if not github_token or not github_username:
+        print("✗ Update failed: Missing GITHUB_TOKEN or GITHUB_USERNAME in github-highamperage.env")
+        return False
+
+    import urllib.request
+    import json
+    try:
+        req = urllib.request.Request("https://api.github.com/user")
+        req.add_header("Authorization", f"Bearer {github_token}")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            user_data = json.loads(response.read().decode())
+            if user_data.get("login") != "highamperage":
+                print(f"✗ Update failed: GitHub token owner is {user_data.get('login')}, expected highamperage")
+                return False
+    except Exception as e:
+        print(f"✗ Update failed: Could not verify GitHub token owner: {e}")
+        return False
+
+    import tempfile
+    helper_fd, helper_path = tempfile.mkstemp(prefix="hermes-git-cred-", suffix=".py", text=True)
+    try:
+        with os.fdopen(helper_fd, 'w') as f:
+            f.write("import os\n")
+            f.write("print('username=' + os.environ.get('_HERMES_UPDATE_USER', ''))\n")
+            f.write("print('password=' + os.environ.get('_HERMES_UPDATE_TOKEN', ''))\n")
+
+        os.chmod(helper_path, 0o700)
+
+        push_env["_HERMES_UPDATE_USER"] = github_username
+        push_env["_HERMES_UPDATE_TOKEN"] = github_token
+
+        py_exe = sys.executable.replace('\\', '/')
+        h_path = helper_path.replace('\\', '/')
+        helper_cmd = f'!\"{py_exe}\" \"{h_path}\"'
+
+        push_res = subprocess.run(
+            git_cmd + ["-c", "credential.helper=", "-c", f"credential.helper={helper_cmd}", *push_args],
+            cwd=cwd,
+            env=push_env,
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        if push_res.returncode == 0:
+            print(f"✓ Committed and pushed local changes to origin/{branch} before updating.")
+        else:
+            print(f"✗ Update failed: Failed to push to origin/{branch}.")
+            err_lines = push_res.stderr.strip().splitlines()
+            if err_lines:
+                err_msg = err_lines[0].replace(github_token, "***") if github_token else err_lines[0]
+                print(f"  ({err_msg})")
+            return False
+    finally:
+        try:
+            os.remove(helper_path)
+        except OSError:
+            pass
+
+
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
     status = subprocess.run(
         git_cmd + ["status", "--porcelain"],
@@ -2695,37 +2839,16 @@ def _mark_skip_upstream_prompt():
     except Exception:
         pass
 
-def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
-    """Attempt to push updated main to origin (sync fork).
+def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> bool:
+    """Check if fork has an upstream remote and sync from upstream before updating.
 
-    Returns True if push succeeded, False otherwise.
-    """
-    try:
-        result = subprocess.run(
-            git_cmd + ["push", "origin", "main", "--force-with-lease"],
-            cwd=cwd,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
-    """Check if fork is behind upstream and sync if safe.
-
-    This implements the fork upstream sync logic:
-    - If upstream remote doesn't exist, ask user if they want to add it
-    - Compare origin/main with upstream/main
-    - If origin/main is strictly behind upstream/main, pull from upstream
-    - Try to sync fork back to origin if possible
+    Returns True if update should continue (sync succeeded, or no sync needed).
+    Returns False if update should abort (merge conflict, syntax check failure, push failure).
     """
     has_upstream = _has_upstream_remote(git_cmd, cwd)
-
     if not has_upstream:
-        # Check if user previously declined
         if _should_skip_upstream_prompt():
-            return
+            return True
 
         # Ask user if they want to add upstream
         print()
@@ -2749,82 +2872,147 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
                 has_upstream = True
             else:
                 print("  ✗ Failed to add upstream remote. Skipping upstream sync.")
-                return
+                return True
         else:
             print(
                 "  Skipped. Run 'git remote add upstream https://github.com/NousResearch/hermes-agent.git' to add later."
             )
             _mark_skip_upstream_prompt()
-            return
+            return True
 
-    # Fetch upstream main only. This sync compares upstream/main with
-    # origin/main, so there's no reason to pull every upstream ref — and a bare
-    # fetch drags in thousands of auto-generated branches.
-    print()
-    print("→ Fetching upstream...")
+    # Determine branch to sync against (current checked-out branch or default main)
+    current_branch = "main"
     try:
-        subprocess.run(
-            git_cmd + ["fetch", "upstream", "main", "--quiet"],
+        res = subprocess.run(
+            git_cmd + ["rev-parse", "--abbrev-ref", "HEAD"],
             cwd=cwd,
             capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
             check=True,
         )
-    except subprocess.CalledProcessError:
-        print("  ✗ Failed to fetch upstream. Skipping upstream sync.")
-        return
+        out = res.stdout.strip()
+        if out and out != "HEAD":
+            current_branch = out
+    except Exception:
+        pass
 
-    # Compare origin/main with upstream/main
-    origin_ahead = _count_commits_between(git_cmd, cwd, "upstream/main", "origin/main")
-    upstream_ahead = _count_commits_between(
-        git_cmd, cwd, "origin/main", "upstream/main"
+    # Verify worktree is clean before attempting any merge
+    try:
+        res = subprocess.run(
+            git_cmd + ["status", "--porcelain"],
+            cwd=cwd,
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+            check=True,
+        )
+        if res.stdout.strip():
+            print("  ⚠ Worktree is dirty — skipping upstream fork sync to preserve uncommitted changes.")
+            return True
+    except Exception:
+        pass
+
+    # Fetch upstream branch
+    print()
+    print(f"→ Fetching upstream {current_branch}...")
+    try:
+        fetch_res = subprocess.run(
+            git_cmd + ["fetch", "upstream", current_branch],
+            cwd=cwd,
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        if fetch_res.returncode != 0:
+            print("  ✗ Failed to fetch from upstream. Skipping upstream sync.")
+            return True
+    except Exception:
+        print("  ✗ Failed to fetch from upstream. Skipping upstream sync.")
+        return True
+
+    # Check if upstream is already contained in HEAD
+    upstream_ref = f"upstream/{current_branch}"
+    try:
+        ancestor_res = subprocess.run(
+            git_cmd + ["merge-base", "--is-ancestor", upstream_ref, "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+        )
+        if ancestor_res.returncode == 0:
+            print("  ✓ Upstream is already current.")
+            return True
+    except Exception:
+        pass
+
+    # Upstream has new commits not contained in HEAD -> Merge upstream into current_branch
+    print()
+    print(f"→ Upstream has new changes. Merging {upstream_ref} into {current_branch}...")
+    merge_res = subprocess.run(
+        git_cmd + ["merge", upstream_ref, "--no-edit"],
+        cwd=cwd,
+        capture_output=True,
+        text=True, encoding="utf-8", errors="replace",
     )
 
-    if origin_ahead < 0 or upstream_ahead < 0:
-        print("  ✗ Could not compare branches. Skipping upstream sync.")
-        return
+    if merge_res.returncode != 0:
+        # Merge conflict detected! Find conflicting files
+        conflicts = []
+        try:
+            diff_res = subprocess.run(
+                git_cmd + ["diff", "--name-only", "--diff-filter=U"],
+                cwd=cwd,
+                capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            conflicts = [f.strip() for f in diff_res.stdout.splitlines() if f.strip()]
+        except Exception:
+            pass
 
-    # If origin/main has commits not on upstream, don't trample
-    if origin_ahead > 0:
-        print()
-        print(f"ℹ Your fork has {origin_ahead} commit(s) not on upstream.")
-        print("  Skipping upstream sync to preserve your changes.")
-        print("  If you want to merge upstream changes, run:")
-        print("    git pull upstream main")
-        return
-
-    # If upstream is not ahead, fork is up to date
-    if upstream_ahead == 0:
-        print("  ✓ Fork is up to date with upstream")
-        return
-
-    # origin/main is strictly behind upstream/main (can fast-forward)
-    print()
-    print(f"→ Fork is {upstream_ahead} commit(s) behind upstream")
-    print("→ Pulling from upstream...")
-
-    try:
+        # Abort merge so worktree remains clean
         subprocess.run(
-            git_cmd + ["pull", "--ff-only", "upstream", "main"],
+            git_cmd + ["merge", "--abort"],
             cwd=cwd,
-            check=True,
+            capture_output=True,
         )
-    except subprocess.CalledProcessError:
-        print(
-            "  ✗ Failed to pull from upstream. You may need to resolve conflicts manually."
-        )
-        return
 
-    print("  ✓ Updated from upstream")
+        print()
+        print(f"✗ Merge conflict detected between local changes and {upstream_ref}.")
+        if conflicts:
+            print("Conflicting files:")
+            for f in conflicts:
+                print(f"  - {f}")
+        print("Merge aborted to keep worktree clean.")
+        print()
+        print("Options to resolve:")
+        print(f"  1. Ask AGY to resolve the conflicts for you.")
+        print(f"  2. Manually merge: git merge {upstream_ref}, resolve conflicts, and re-run update.")
+        return False
 
-    # Try to sync fork back to origin
-    print("→ Syncing fork...")
-    if _sync_fork_with_upstream(git_cmd, cwd):
-        print("  ✓ Fork synced with upstream")
-    else:
-        print(
-            "  ℹ Got updates from upstream but couldn't push to fork (no write access?)"
-        )
-        print("    Your local repo is updated, but your fork on GitHub may be behind.")
+    # Validate post-merge critical files syntax
+    syntax_ok, failing_file, err_msg = _validate_critical_files_syntax(cwd)
+    if not syntax_ok:
+        print(f"✗ Post-merge syntax check failed on {failing_file}: {err_msg}")
+        return False
+
+    # Push successful merge to origin
+    print(f"→ Pushing merged updates to origin/{current_branch}...")
+    push_res = subprocess.run(
+        git_cmd + ["push", "origin", current_branch],
+        cwd=cwd,
+        capture_output=True,
+        text=True, encoding="utf-8", errors="replace",
+    )
+
+    if push_res.returncode != 0:
+        stderr = push_res.stderr.strip()
+        print()
+        print(f"✗ Push to origin/{current_branch} failed.")
+        if stderr:
+            print(f"  {stderr.splitlines()[0]}")
+        print("The upstream merge succeeded locally, but could not be pushed to origin.")
+        print(f"Please check your git push credentials or run 'git push origin {current_branch}' manually.")
+        return False
+
+    print(f"  ✓ Successfully merged {upstream_ref} and pushed to origin/{current_branch}.")
+    return True
 
 def _invalidate_update_cache():
     """Delete the update-check cache for ALL profiles so no banner
@@ -7595,6 +7783,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
     # Fetch and pull
     try:
+        # Run fork-aware upstream sync before origin fetch/pull
+        if not _m()._sync_with_upstream_if_needed(git_cmd, _m().PROJECT_ROOT):
+            _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
+            sys.exit(1)
 
         # Resolve the target branch up front so the fetch can be scoped to it.
         # A bare `git fetch origin` pulls every ref, and this repo carries
@@ -7665,83 +7857,16 @@ def _cmd_update_impl(args, gateway_mode: bool):
         #                    stop before the post-update steps reinforce the
         #                    stale tree.
         parked_branch_switched = False
-        in_place_update = False
-        if current_branch != branch and current_branch != "HEAD":
-            switch_safe, switch_block_reason = _m()._assess_parked_branch_switch(
-                git_cmd, _m().PROJECT_ROOT, current_branch, branch
+        if current_branch != branch:
+            label = (
+                "detached HEAD"
+                if current_branch == "HEAD"
+                else f"branch '{current_branch}'"
             )
-            if not switch_safe:
-                _m()._print_parked_branch_skip_warning(
-                    git_cmd,
-                    _m().PROJECT_ROOT,
-                    current_branch,
-                    branch,
-                    switch_block_reason,
-                )
-                print()
-                print(
-                    "⚠ Update finished — code update SKIPPED"
-                    f"{_branch_head_suffix(git_cmd, _m().PROJECT_ROOT)}"
-                )
-                _m()._resume_windows_gateways_after_update(
-                    _windows_gateway_resume
-                )
+            print(f"  ⚠ Currently on {label} — switching to {branch} for update...")
+            # Commit before checkout so uncommitted work isn't lost
+            if _m()._commit_and_push_local_changes_if_needed(git_cmd, _m().PROJECT_ROOT, current_branch) is False:
                 sys.exit(1)
-            if switch_block_reason.startswith("unmerged:"):
-                _in_place_configured = False
-                try:
-                    from hermes_cli.config import load_config as _load_cfg
-
-                    _upd_cfg = (_load_cfg() or {}).get("updates", {})
-                    _in_place_configured = (
-                        isinstance(_upd_cfg, dict)
-                        and _upd_cfg.get("parked_branch_strategy", "switch")
-                        == "update_in_place"
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "Could not read updates.parked_branch_strategy: %s", exc
-                    )
-                if _in_place_configured and not switch_branch:
-                    # The merge source must exist upstream; --branch typos
-                    # previously surfaced through the checkout failing, which
-                    # does not run on this path.
-                    verify_ref = subprocess.run(
-                        git_cmd + ["rev-parse", "--verify", "--quiet", f"origin/{branch}"],
-                        cwd=_m().PROJECT_ROOT,
-                        capture_output=True,
-                        text=True, encoding="utf-8", errors="replace",
-                    )
-                    if verify_ref.returncode != 0:
-                        print(f"✗ Branch '{branch}' does not exist locally or on origin.")
-                        sys.exit(1)
-                    in_place_update = True
-                    print(
-                        f"  ℹ On branch '{current_branch}' — updating it in place from "
-                        f"origin/{branch} (no branch switch; local commits preserved)."
-                    )
-                else:
-                    parked_branch_switched = True
-                    _m()._print_parked_branch_kept_notice(
-                        current_branch,
-                        branch,
-                        switch_block_reason.split(":", 1)[1],
-                    )
-            else:
-                parked_branch_switched = True
-                print(
-                    f"  ⚠ Checkout was parked on '{current_branch}' "
-                    f"(fully merged) — switching back to {branch}..."
-                )
-
-        if not in_place_update and current_branch != branch:
-            if current_branch == "HEAD":
-                print(
-                    f"  ⚠ Currently on detached HEAD — switching to {branch} "
-                    "for update..."
-                )
-            # Stash before checkout so uncommitted work isn't lost
-            auto_stash_ref = _m()._stash_local_changes_if_needed(git_cmd, _m().PROJECT_ROOT)
             checkout_result = subprocess.run(
                 git_cmd + ["checkout", branch],
                 cwd=_m().PROJECT_ROOT,
@@ -7760,28 +7885,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     text=True, encoding="utf-8", errors="replace",
                 )
                 if track_result.returncode != 0:
-                    # Restore the user's prior stash before bailing
-                    # so we don't leave them stranded in a weird state.
-                    if auto_stash_ref is not None:
-                        _m()._restore_stashed_changes(
-                            git_cmd,
-                            _m().PROJECT_ROOT,
-                            auto_stash_ref,
-                            prompt_user=False,
-                            input_fn=gw_input_fn,
-                        )
                     print(f"✗ Branch '{branch}' does not exist locally or on origin.")
                     if track_result.stderr.strip():
                         print(f"  {track_result.stderr.strip().splitlines()[0]}")
                     sys.exit(1)
         else:
-            auto_stash_ref = _m()._stash_local_changes_if_needed(git_cmd, _m().PROJECT_ROOT)
-
-        prompt_for_restore = (
-            auto_stash_ref is not None
-            and not assume_yes
-            and (gateway_mode or (sys.stdin.isatty() and sys.stdout.isatty()))
-        )
+            if _m()._commit_and_push_local_changes_if_needed(git_cmd, _m().PROJECT_ROOT, current_branch) is False:
+                sys.exit(1)
 
         # Check if there are updates. On shallow checkouts `rev-list --count`
         # walks the truncated graph and can report the entire remote ancestry
@@ -7850,33 +7960,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         if commit_count == 0:
             _invalidate_update_cache()
-
-            # Restore stash and switch back to original branch if we moved.
-            # EXCEPTION: a parked feature branch we verified clean + fully
-            # merged stays on the target — re-parking the checkout on the
-            # stale branch is the 2026-08-17 incident all over again.
-            if auto_stash_ref is not None:
-                _m()._restore_stashed_changes(
-                    git_cmd,
-                    _m().PROJECT_ROOT,
-                    auto_stash_ref,
-                    prompt_user=prompt_for_restore,
-                    input_fn=gw_input_fn,
-                )
-            if parked_branch_switched:
-                if switch_block_reason.startswith("unmerged:"):
-                    _count = switch_block_reason.split(":", 1)[1]
-                    print(
-                        f"  ✓ Checkout was parked on '{current_branch}' — "
-                        f"switched back to {branch}; {_count} unmerged "
-                        f"commit(s) kept on '{current_branch}'."
-                    )
-                else:
-                    print(
-                        f"  ✓ Checkout was parked on '{current_branch}' (fully "
-                        f"merged) — switched back to {branch}."
-                    )
-            elif current_branch not in {branch, "HEAD"}:
+            if current_branch not in {branch, "HEAD"}:
                 subprocess.run(
                     git_cmd + ["checkout", current_branch],
                     cwd=_m().PROJECT_ROOT,
@@ -8028,169 +8112,82 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # every user who ran ``hermes update`` for the 7 minutes between
         # the bad commit and the fix landing).
         pre_pull_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
-        try:
-            # Merge the ref we already fetched above (→ Fetching updates...)
-            # instead of `git pull`, which performs a SECOND network fetch of
-            # the same branch (~0.5-1.5 s of redundant round-trip per update).
-            # `merge --ff-only origin/<branch>` is byte-identical in effect to
-            # `pull --ff-only origin <branch>` given the fresh tracking ref;
-            # the divergence fallback below is unchanged.
-            pull_result = subprocess.run(
-                git_cmd + ["merge", "--ff-only", f"origin/{branch}"],
+        # Merge the ref we already fetched above (→ Fetching updates...)
+        # instead of `git pull`, which performs a SECOND network fetch of
+        # the same branch (~0.5-1.5 s of redundant round-trip per update).
+        # `merge --ff-only origin/<branch>` is byte-identical in effect to
+        # `pull --ff-only origin <branch>` given the fresh tracking ref;
+        # the divergence fallback below is unchanged.
+        pull_result = subprocess.run(
+            git_cmd + ["merge", "--ff-only", f"origin/{branch}"],
+            cwd=_m().PROJECT_ROOT,
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        if pull_result.returncode != 0:
+            # ff-only failed — local and remote have diverged (e.g. upstream
+            # force-pushed or rebase).  Since local changes are already
+            # stashed, reset to match the remote exactly.
+            print(
+                "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
+            )
+            reset_result = subprocess.run(
+                git_cmd + ["reset", "--hard", f"origin/{branch}"],
                 cwd=_m().PROJECT_ROOT,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
             )
-            if pull_result.returncode != 0:
-                # ff-only failed — local and remote have diverged. Before
-                # assuming an upstream force-push, check WHY: a checkout on a
-                # custom branch (local commits on top of origin/<branch>) also
-                # cannot fast-forward, and `reset --hard` here would silently
-                # discard that work. Merge instead and stop cleanly on
-                # conflict — an update must never destroy local commits.
-                _cur_branch = (
-                    subprocess.run(
-                        git_cmd + ["branch", "--show-current"],
-                        cwd=_m().PROJECT_ROOT,
-                        capture_output=True,
-                        text=True, encoding="utf-8", errors="replace",
-                    ).stdout
-                    or ""
-                ).strip()
-                if _cur_branch and _cur_branch != branch:
-                    print(
-                        f"  ⚠ Checkout is on custom branch '{_cur_branch}' — "
-                        f"merging origin/{branch} instead of resetting so local commits survive..."
-                    )
-                    # Best-effort safety tag; recovery anchor if anything goes wrong.
-                    subprocess.run(
-                        git_cmd
-                        + ["tag", f"pre-update-{_time.strftime('%Y%m%d-%H%M%S')}"],
-                        cwd=_m().PROJECT_ROOT,
-                        capture_output=True,
-                        check=False,
-                    )
-                    merge_result = subprocess.run(
-                        git_cmd + ["merge", "--no-edit", f"origin/{branch}"],
-                        cwd=_m().PROJECT_ROOT,
-                        capture_output=True,
-                        text=True, encoding="utf-8", errors="replace",
-                    )
-                    if merge_result.returncode != 0:
-                        subprocess.run(
-                            git_cmd + ["merge", "--abort"],
-                            cwd=_m().PROJECT_ROOT,
-                            capture_output=True,
-                            check=False,
-                        )
-                        print(
-                            "✗ Merge conflict between local commits and upstream — "
-                            "update stopped, nothing was changed."
-                        )
-                        print(
-                            f"  Resolve manually: cd {_m().PROJECT_ROOT} && "
-                            f"git merge origin/{branch}"
-                        )
-                        print(
-                            "  Then re-run the update. Local work is untouched."
-                        )
-                        sys.exit(1)
-                else:
-                    # Same branch as the update target — a true upstream
-                    # force-push/rebase. Local changes are already stashed;
-                    # reset to match the remote exactly (original behaviour).
-                    print(
-                        "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
-                    )
-                    reset_result = subprocess.run(
-                        git_cmd + ["reset", "--hard", f"origin/{branch}"],
-                        cwd=_m().PROJECT_ROOT,
-                        capture_output=True,
-                        text=True, encoding="utf-8", errors="replace",
-                    )
-                    if reset_result.returncode != 0:
-                        print(f"✗ Failed to reset to origin/{branch}.")
-                        if reset_result.stderr.strip():
-                            print(f"  {reset_result.stderr.strip()}")
-                        print(
-                            f"  Try manually: git fetch origin && git reset --hard origin/{branch}"
-                        )
-                        sys.exit(1)
-
-            # Post-pull syntax guard: validate critical-path files actually
-            # parse before declaring the update successful. If a bad commit
-            # made it through CI (e.g. admin-merge bypass of a failing
-            # ruff check), this catches it on the user side and rolls back
-            # so the CLI stays bootable. The user can then retry ``hermes
-            # update`` later once a fix lands upstream.
-            syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(
-                _m().PROJECT_ROOT
-            )
-            if not syntax_ok:
-                print()
-                print("✗ Pulled code has a syntax error in a critical file:")
-                print(f"  {failing_path}")
-                if syntax_error:
-                    # py_compile errors can be multi-line; show the first
-                    # ~6 lines so the user sees the actual SyntaxError text.
-                    for line in str(syntax_error).splitlines()[:6]:
-                        print(f"    {line}")
-                if pre_pull_sha:
-                    print()
-                    print(f"→ Rolling back to {pre_pull_sha[:10]}...")
-                    rollback_result = subprocess.run(
-                        git_cmd + ["reset", "--hard", pre_pull_sha],
-                        cwd=_m().PROJECT_ROOT,
-                        capture_output=True,
-                        text=True, encoding="utf-8", errors="replace",
-                    )
-                    if rollback_result.returncode == 0:
-                        print("  ✓ Rollback complete — your install is unchanged.")
-                        print("  Try ``hermes update`` again later once a fix lands.")
-                    else:
-                        print("  ✗ Rollback failed. Recover manually with:")
-                        print(f"    cd {_m().PROJECT_ROOT} && git reset --hard {pre_pull_sha}")
-                        if rollback_result.stderr.strip():
-                            print(f"    ({rollback_result.stderr.strip().splitlines()[0]})")
-                else:
-                    print()
-                    print("  Could not capture pre-pull SHA — recover manually with:")
-                    print(f"    cd {_m().PROJECT_ROOT} && git reflog && git reset --hard <prev-sha>")
+            if reset_result.returncode != 0:
+                print(f"✗ Failed to reset to origin/{branch}.")
+                if reset_result.stderr.strip():
+                    print(f"  {reset_result.stderr.strip()}")
+                print(
+                    f"  Try manually: git fetch origin && git reset --hard origin/{branch}"
+                )
                 sys.exit(1)
 
-            update_succeeded = True
-        finally:
-            if auto_stash_ref is not None:
-                # Don't attempt stash restore if the code update itself failed —
-                # working tree is in an unknown state.
-                if not update_succeeded:
-                    print(
-                        f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
-                    )
-                    print("  Restore manually with: git stash apply")
-                elif discard_local_changes:
-                    # Non-interactive update + user opted into discarding local
-                    # source edits (updates.non_interactive_local_changes:
-                    # discard). Throw the stash away instead of re-applying it.
-                    _m()._discard_stashed_changes(
-                        git_cmd,
-                        _m().PROJECT_ROOT,
-                        auto_stash_ref,
-                    )
-                elif keep_stash:
-                    # --keep-stash (desktop updater): the update landed; leave
-                    # local edits parked in the stash instead of silently
-                    # re-applying them onto the updated code.
-                    _m()._park_stashed_changes(auto_stash_ref)
+        # Post-pull syntax guard: validate critical-path files actually
+        # parse before declaring the update successful. If a bad commit
+        # made it through CI (e.g. admin-merge bypass of a failing
+        # ruff check), this catches it on the user side and rolls back
+        # so the CLI stays bootable. The user can then retry ``hermes
+        # update`` later once a fix lands upstream.
+        syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(
+            _m().PROJECT_ROOT
+        )
+        if not syntax_ok:
+            print()
+            print("✗ Pulled code has a syntax error in a critical file:")
+            print(f"  {failing_path}")
+            if syntax_error:
+                # py_compile errors can be multi-line; show the first
+                # ~6 lines so the user sees the actual SyntaxError text.
+                for line in str(syntax_error).splitlines()[:6]:
+                    print(f"    {line}")
+            if pre_pull_sha:
+                print()
+                print(f"→ Rolling back to {pre_pull_sha[:10]}...")
+                rollback_result = subprocess.run(
+                    git_cmd + ["reset", "--hard", pre_pull_sha],
+                    cwd=_m().PROJECT_ROOT,
+                    capture_output=True,
+                    text=True, encoding="utf-8", errors="replace",
+                )
+                if rollback_result.returncode == 0:
+                    print("  ✓ Rollback complete — your install is unchanged.")
+                    print("  Try ``hermes update`` again later once a fix lands.")
                 else:
-                    _m()._restore_stashed_changes(
-                        git_cmd,
-                        _m().PROJECT_ROOT,
-                        auto_stash_ref,
-                        prompt_user=prompt_for_restore,
-                        input_fn=gw_input_fn,
-                    )
+                    print("  ✗ Rollback failed. Recover manually with:")
+                    print(f"    cd {_m().PROJECT_ROOT} && git reset --hard {pre_pull_sha}")
+                    if rollback_result.stderr.strip():
+                        print(f"    ({rollback_result.stderr.strip().splitlines()[0]})")
+            else:
+                print()
+                print("  Could not capture pre-pull SHA — recover manually with:")
+                print(f"    cd {_m().PROJECT_ROOT} && git reflog && git reset --hard <prev-sha>")
+            sys.exit(1)
 
+        update_succeeded = True
         _invalidate_update_cache()
 
         # Verify HEAD actually moved (issue #79678). ``merge --ff-only``
@@ -8268,10 +8265,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
             )
         _m()._record_bytecode_fingerprint()
         _m()._refresh_bootstrap_cache_scripts(branch)
-
-        # Fork upstream sync logic (only for main branch on forks)
-        if is_fork and branch == "main":
-            _m()._sync_with_upstream_if_needed(git_cmd, _m().PROJECT_ROOT)
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra
         # breaks on this machine, keep base deps and reinstall the remaining extras
