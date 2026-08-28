@@ -3850,14 +3850,13 @@ Execute self-contained update workflow.
 ## Settled decisions
 - Perform repository checks: cd /home/hermes/.hermes/hermes-agent, verify repository root, main branch, and remotes.
 - Fetch origin and upstream.
-- Integrate upstream/main into main, then origin/main if advanced.
+- Auto-commit and push any uncommitted local changes first.
+- Integrate upstream/main into main, then origin/main if advanced. Assume there will be merge conflicts and auto-handle them by keeping local changes (-X ours).
 - Run the documented build command and one targeted smoke test.
 - Git identity: unset COPILOT_GITHUB_TOKEN only. Source credentials using 'set -a; source /home/hermes/.hermes/github-highamperage.env; set +a'.
 - Push directly to origin main with ordinary 'git push origin main'.
 
 ## Stop conditions
-- Merge conflicts.
-- Unrelated pre-existing changes.
 - Failed build/smoke test.
 - Failed push.
 
