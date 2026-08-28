@@ -1457,7 +1457,7 @@ def _commit_and_push_local_changes_if_needed(git_cmd: list[str], cwd: Path, bran
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     commit_msg = f"chore: auto-commit before hermes update ({timestamp})"
     print("→ Local changes detected — committing before update...")
-    
+
     commit_res = subprocess.run(
         git_cmd + ["commit", "-m", commit_msg],
         cwd=cwd,
@@ -1465,8 +1465,8 @@ def _commit_and_push_local_changes_if_needed(git_cmd: list[str], cwd: Path, bran
         text=True, encoding="utf-8", errors="replace",
     )
     if commit_res.returncode != 0:
-        print(f"⚠ Auto-commit failed: {commit_res.stderr.strip()}")
-        return None
+        print(f"✗ Update failed: Auto-commit failed: {commit_res.stderr.strip()}")
+        return False
 
     track_check = subprocess.run(
         git_cmd + ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
@@ -1474,25 +1474,93 @@ def _commit_and_push_local_changes_if_needed(git_cmd: list[str], cwd: Path, bran
         capture_output=True,
         text=True, encoding="utf-8", errors="replace",
     )
-    
+
     push_args = ["push", "origin", branch]
     if track_check.returncode != 0:
         push_args = ["push", "-u", "origin", branch]
 
     print(f"→ Pushing auto-commit to origin/{branch}...")
-    push_res = subprocess.run(
-        git_cmd + push_args,
-        cwd=cwd,
-        capture_output=True,
-        text=True, encoding="utf-8", errors="replace",
-    )
-    if push_res.returncode == 0:
-        print(f"✓ Committed and pushed local changes to origin/{branch} before updating.")
-    else:
-        print(f"⚠ Changes were committed locally, but failed to push to origin/{branch}.")
-        print(f"  Resolve manually later (e.g. git pull --rebase origin {branch} && git push).")
-        if push_res.stderr.strip():
-            print(f"  ({push_res.stderr.strip().splitlines()[0]})")
+
+    env_file = Path("/home/hermes/.hermes/github-highamperage.env")
+    push_env = os.environ.copy()
+    push_env.pop("COPILOT_GITHUB_TOKEN", None)
+    push_env["GIT_TERMINAL_PROMPT"] = "0"
+    push_env["GIT_ASKPASS"] = "echo"
+
+    github_token = None
+    github_username = None
+    if env_file.exists():
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k == "GITHUB_TOKEN":
+                        github_token = v
+                    elif k == "GITHUB_USERNAME":
+                        github_username = v
+
+    if not github_token or not github_username:
+        print("✗ Update failed: Missing GITHUB_TOKEN or GITHUB_USERNAME in github-highamperage.env")
+        return False
+
+    import urllib.request
+    import json
+    try:
+        req = urllib.request.Request("https://api.github.com/user")
+        req.add_header("Authorization", f"Bearer {github_token}")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            user_data = json.loads(response.read().decode())
+            if user_data.get("login") != "highamperage":
+                print(f"✗ Update failed: GitHub token owner is {user_data.get('login')}, expected highamperage")
+                return False
+    except Exception as e:
+        print(f"✗ Update failed: Could not verify GitHub token owner: {e}")
+        return False
+
+    import tempfile
+    helper_fd, helper_path = tempfile.mkstemp(prefix="hermes-git-cred-", suffix=".py", text=True)
+    try:
+        with os.fdopen(helper_fd, 'w') as f:
+            f.write("import os\n")
+            f.write("print('username=' + os.environ.get('_HERMES_UPDATE_USER', ''))\n")
+            f.write("print('password=' + os.environ.get('_HERMES_UPDATE_TOKEN', ''))\n")
+
+        os.chmod(helper_path, 0o700)
+
+        push_env["_HERMES_UPDATE_USER"] = github_username
+        push_env["_HERMES_UPDATE_TOKEN"] = github_token
+
+        py_exe = sys.executable.replace('\\', '/')
+        h_path = helper_path.replace('\\', '/')
+        helper_cmd = f'!\"{py_exe}\" \"{h_path}\"'
+
+        push_res = subprocess.run(
+            git_cmd + ["-c", "credential.helper=", "-c", f"credential.helper={helper_cmd}", *push_args],
+            cwd=cwd,
+            env=push_env,
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        if push_res.returncode == 0:
+            print(f"✓ Committed and pushed local changes to origin/{branch} before updating.")
+        else:
+            print(f"✗ Update failed: Failed to push to origin/{branch}.")
+            err_lines = push_res.stderr.strip().splitlines()
+            if err_lines:
+                err_msg = err_lines[0].replace(github_token, "***") if github_token else err_lines[0]
+                print(f"  ({err_msg})")
+            return False
+    finally:
+        try:
+            os.remove(helper_path)
+        except OSError:
+            pass
+
 
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
     status = subprocess.run(
@@ -5019,7 +5087,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
             )
             print(f"  ⚠ Currently on {label} — switching to {branch} for update...")
             # Commit before checkout so uncommitted work isn't lost
-            _m()._commit_and_push_local_changes_if_needed(git_cmd, _m().PROJECT_ROOT, current_branch)
+            if _m()._commit_and_push_local_changes_if_needed(git_cmd, _m().PROJECT_ROOT, current_branch) is False:
+                sys.exit(1)
             checkout_result = subprocess.run(
                 git_cmd + ["checkout", branch],
                 cwd=_m().PROJECT_ROOT,
@@ -5043,7 +5112,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         print(f"  {track_result.stderr.strip().splitlines()[0]}")
                     sys.exit(1)
         else:
-            _m()._commit_and_push_local_changes_if_needed(git_cmd, _m().PROJECT_ROOT, current_branch)
+            if _m()._commit_and_push_local_changes_if_needed(git_cmd, _m().PROJECT_ROOT, current_branch) is False:
+                sys.exit(1)
 
         # Check if there are updates. On shallow checkouts `rev-list --count`
         # walks the truncated graph and can report the entire remote ancestry
