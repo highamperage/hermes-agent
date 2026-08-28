@@ -3701,8 +3701,10 @@ class CLICommandsMixin:
         from hermes_cli.config import is_managed, format_managed_message
         from hermes_constants import get_hermes_home
 
+        print("  [Update] Starting /update workflow...")
+
         if is_managed():
-            print(f"  ✗ {format_managed_message('update Hermes Agent')}")
+            print(f"  [Update] ✗ {format_managed_message('update Hermes Agent')}")
             return False
 
         # Use the prompt_toolkit-native modal so the confirmation panel
@@ -3717,12 +3719,14 @@ class CLICommandsMixin:
             choices=choices,
         )
         if raw is None:
-            print("  🟡 /update cancelled.")
+            print("  [Update] 🟡 /update cancelled.")
             return False
         choice = self._normalize_slash_confirm_choice(raw, choices)
         if choice != "once":
-            print("  🟡 /update cancelled.")
+            print("  [Update] 🟡 /update cancelled.")
             return False
+
+        print("  [Update] ✓ Update confirmed.")
 
         task_token = str(uuid.uuid4())
         tmux_target = f"agy-update-{task_token[:12]}"
@@ -3731,6 +3735,7 @@ class CLICommandsMixin:
         state_file = os.path.join(get_hermes_home(), "update_task.json")
 
         if os.path.exists(state_file):
+            print(f"  [Update] Found existing state file: {state_file}")
             try:
                 with open(state_file, "r") as f:
                     state = json.load(f)
@@ -3760,6 +3765,7 @@ class CLICommandsMixin:
                                 is_stale = True
 
                 if is_stale:
+                    print("  [Update] ✓ Existing task is stale. Cleaning up.")
                     tracked_packet = state.get("packet_path")
                     if tracked_packet and os.path.exists(tracked_packet):
                         try:
@@ -3768,7 +3774,7 @@ class CLICommandsMixin:
                             pass
                     os.remove(state_file)
                 else:
-                    print("  ✗ An update task is already running in the background.")
+                    print("  [Update] ✗ An update task is already running in the background.")
                     return False
             except Exception:
                 pass
@@ -3780,17 +3786,19 @@ class CLICommandsMixin:
             "packet_path": packet_file
         }
 
+        print(f"  [Update] Creating state file: {state_file}")
         try:
             fd = os.open(state_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as f:
                 json.dump(state_data, f)
         except FileExistsError:
-            print("  ✗ An update task started concurrently.")
+            print("  [Update] ✗ An update task started concurrently.")
             return False
         except Exception as e:
-            print(f"  ✗ Failed to create update task state: {e}")
+            print(f"  [Update] ✗ Failed to create update task state: {e}")
             return False
 
+        print(f"  [Update] Creating task packet: {packet_file}")
         packet_content = f"""# Update Task Packet
 
 ## Objective
@@ -3845,13 +3853,15 @@ AGY FAILED {task_token}
             with os.fdopen(fd_pkt, "w") as f_pkt:
                 f_pkt.write(packet_content)
         except Exception as e:
-            print(f"  ✗ Failed to create update task packet: {e}")
+            print(f"  [Update] ✗ Failed to create update task packet: {e}")
             try:
                 os.remove(state_file)
             except Exception:
                 pass
+            print("  [Update] Cleaning up task state and packet...")
             return False
 
+        print("  [Update] Resolving AGY executable...")
         agy_path = shutil.which("agy")
         if not agy_path:
             local_bin_agy = os.path.expanduser("~/.local/bin/agy")
@@ -3859,14 +3869,16 @@ AGY FAILED {task_token}
                 agy_path = local_bin_agy
 
         if not agy_path:
-            print("  ✗ AGY executable not found in PATH or ~/.local/bin/agy.")
+            print("  [Update] ✗ AGY executable not found in PATH or ~/.local/bin/agy.")
             try:
                 os.remove(packet_file)
                 os.remove(state_file)
             except Exception:
                 pass
+            print("  [Update] Cleaning up task state and packet...")
             return False
 
+        print(f"  [Update] Launching dedicated tmux session '{tmux_target}'...")
         # Start detached tmux session with cwd /home/hermes/.hermes/hermes-agent
         cmd = f"{shlex.quote(agy_path)} --model gemini-3.1-pro-high --effort high --mode accept-edits --dangerously-skip-permissions"
         start_proc = subprocess.run(
@@ -3887,7 +3899,7 @@ AGY FAILED {task_token}
             time.sleep(0.5)
 
         if not session_ready:
-            print(f"  ✗ Failed to create dedicated tmux session '{tmux_target}'.")
+            print(f"  [Update] ✗ Failed to create dedicated tmux session '{tmux_target}'.")
             if start_proc.stderr:
                 print(f"    Launcher stderr: {start_proc.stderr.decode('utf-8', errors='replace').strip()}")
 
@@ -3902,11 +3914,15 @@ AGY FAILED {task_token}
                 os.remove(state_file)
             except Exception:
                 pass
+            print("  [Update] Cleaning up task state and packet...")
             return False
+
+        print(f"  [Update] ✓ tmux session '{tmux_target}' is ready.")
 
         prompt = f"Read {packet_file} and execute it as an isolated one-shot task. Do not resume any prior conversation. Finish exactly with the tokenized marker. Work only in /home/hermes/.hermes/hermes-agent."
 
         try:
+            print("  [Update] Loading prompt into tmux paste buffer...")
             # Load prompt into tmux paste buffer
             load_proc = subprocess.run(
                 ["tmux", "load-buffer", "-"],
@@ -3915,13 +3931,15 @@ AGY FAILED {task_token}
             )
             if load_proc.returncode != 0:
                 err = load_proc.stderr.decode("utf-8", errors="replace").strip()
-                print(f"  ✗ Failed to load tmux paste buffer: {err}")
+                print(f"  [Update] ✗ Failed to load tmux paste buffer: {err}")
                 try:
                     os.remove(packet_file)
                     os.remove(state_file)
                 except: pass
+                print("  [Update] Cleaning up task state and packet...")
                 return False
 
+            print("  [Update] Pasting prompt into tmux session...")
             # Paste buffer into agy session
             paste_proc = subprocess.run(
                 ["tmux", "paste-buffer", "-t", tmux_target],
@@ -3929,13 +3947,15 @@ AGY FAILED {task_token}
             )
             if paste_proc.returncode != 0:
                 err = paste_proc.stderr.decode("utf-8", errors="replace").strip()
-                print(f"  ✗ Failed to paste buffer into tmux session '{tmux_target}': {err}")
+                print(f"  [Update] ✗ Failed to paste buffer into tmux session '{tmux_target}': {err}")
                 try:
                     os.remove(packet_file)
                     os.remove(state_file)
                 except: pass
+                print("  [Update] Cleaning up task state and packet...")
                 return False
 
+            print("  [Update] Dispatching Enter keypress...")
             # Send Enter keypress
             send_proc = subprocess.run(
                 ["tmux", "send-keys", "-t", tmux_target, "Enter"],
@@ -3943,23 +3963,25 @@ AGY FAILED {task_token}
             )
             if send_proc.returncode != 0:
                 err = send_proc.stderr.decode("utf-8", errors="replace").strip()
-                print(f"  ✗ Failed to send key to tmux session '{tmux_target}': {err}")
+                print(f"  [Update] ✗ Failed to send key to tmux session '{tmux_target}': {err}")
                 try:
                     os.remove(packet_file)
                     os.remove(state_file)
                 except: pass
+                print("  [Update] Cleaning up task state and packet...")
                 return False
         except Exception as exc:
-            print(f"  ✗ Failed to dispatch to tmux session '{tmux_target}': {exc}")
+            print(f"  [Update] ✗ Failed to dispatch to tmux session '{tmux_target}': {exc}")
             try:
                 os.remove(packet_file)
                 os.remove(state_file)
             except Exception:
                 pass
+            print("  [Update] Cleaning up task state and packet...")
             return False
 
         print()
-        print(f"  ⚕ Dispatched update task to dedicated tmux session '{tmux_target}'. Exiting session...")
+        print(f"  [Update] ⚕ Dispatched update task to dedicated tmux session '{tmux_target}'. Exiting session...")
         print()
 
         try:
@@ -3974,6 +3996,7 @@ AGY FAILED {task_token}
                 tty_path = "/dev/tty"
 
             if tty_path:
+                print("  [Update] Starting background watcher...")
                 watcher_script = os.path.join(os.path.dirname(__file__), "agy_watcher.py")
                 if os.path.exists(watcher_script):
                     subprocess.Popen(

@@ -37,20 +37,6 @@ def main():
     expected_done = f"AGY DONE {task_token}"
     expected_failed = f"AGY FAILED {task_token}"
 
-    def is_safe_line(line):
-        if line == expected_done or line == expected_failed:
-            return True
-        if line.startswith("▸ Thought "):
-            return True
-        if any(line.startswith(prefix) for prefix in [
-            "● Read(", "● Edit(", "● Write(", "● Bash(", "● Search(", "● Glob(", "● Task("
-        ]):
-            return True
-        if line in ["Generating...", "Thinking..."]:
-            return True
-        if any(marker in line.lower() for marker in ["quota exceeded", "rate limit exceeded", "resource_exhausted", "429", "try again in", "retry after", "daily quota"]):
-            return True
-        return False
 
     try:
         while True:
@@ -116,8 +102,7 @@ def main():
                     _write("  [Watcher] ✗ Update workflow failed.")
                     return
 
-                if is_safe_line(sline):
-                    _write(f"  [AGY] {sline}")
+                _write(f"  [AGY] {sline}")
 
             time.sleep(2)
     except Exception as e:
@@ -128,6 +113,7 @@ def main():
                 with open(state_file, "r") as f:
                     state = json.load(f)
                 if state.get("task_token") == task_token:
+                    _write("  [Watcher] Cleaning up task state and packet...")
                     packet_path = state.get("packet_path")
                     if packet_path and os.path.exists(packet_path):
                         try:
