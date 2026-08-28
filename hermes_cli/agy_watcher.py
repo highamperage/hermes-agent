@@ -29,7 +29,7 @@ def main():
     _write(f"\n  [Watcher] Polling AGY update progress in tmux '{tmux_target}'...")
 
     is_first_capture = True
-    seen_lines = set()
+    last_seen_lines = []
     consecutive_errors = 0
     start_time = time.time()
     TIMEOUT = 1800
@@ -54,7 +54,7 @@ def main():
                 break
 
             cap = subprocess.run(
-                ["tmux", "capture-pane", "-p", "-t", tmux_target, "-S", "-200"],
+                ["tmux", "capture-pane", "-p", "-t", tmux_target, "-S", "-5000"],
                 capture_output=True
             )
 
@@ -69,13 +69,14 @@ def main():
             consecutive_errors = 0
             lines = cap.stdout.decode("utf-8", errors="replace").splitlines()
 
+            # Remove trailing empty lines that tmux sometimes pads with
+            while lines and not lines[-1].strip():
+                lines.pop()
+
             if is_first_capture:
-                # Establish baseline without printing historical lines
+                last_seen_lines = lines[-15:] if len(lines) >= 15 else lines
                 for line in lines:
                     sline = line.strip()
-                    if not sline: continue
-                    seen_lines.add(sline)
-                    # If sentinel already exists, accept as immediate completion
                     if sline == expected_done:
                         _write("  [Watcher] ✓ Update workflow completed.")
                         return
@@ -86,12 +87,29 @@ def main():
                 time.sleep(2)
                 continue
 
-            for line in lines:
-                sline = line.strip()
-                if not sline or sline in seen_lines:
-                    continue
+            start_idx = len(lines)
+            if last_seen_lines:
+                block_len = len(last_seen_lines)
+                found = False
+                for i in range(len(lines) - block_len, -1, -1):
+                    if lines[i:i+block_len] == last_seen_lines:
+                        start_idx = i + block_len
+                        found = True
+                        break
+                if not found:
+                    # fallback if scrolled too fast
+                    start_idx = 0
+            else:
+                start_idx = 0
 
-                seen_lines.add(sline)
+            new_lines = lines[start_idx:]
+            if new_lines:
+                last_seen_lines = lines[-15:] if len(lines) >= 15 else lines
+
+            for line in new_lines:
+                sline = line.strip()
+                if not sline:
+                    continue
 
                 if sline == expected_done:
                     _write(f"  [AGY] {sline}")
