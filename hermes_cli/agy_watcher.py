@@ -23,6 +23,16 @@ def main():
         except Exception:
             pass
 
+    def _get_latest_snippet(lines_list):
+        for line in reversed(lines_list):
+            s = line.strip()
+            if s:
+                s = " ".join(s.split())
+                if len(s) > 160:
+                    return s[:157] + "..."
+                return s
+        return ""
+
     state_file = os.path.join(get_hermes_home(), "update_task.json")
 
     time.sleep(1)
@@ -30,6 +40,7 @@ def main():
 
     is_first_capture = True
     last_seen_lines = []
+    last_reported_snippet = ""
     consecutive_errors = 0
     start_time = time.time()
     TIMEOUT = 1800
@@ -84,6 +95,10 @@ def main():
                         _write("  [Watcher] ✗ Update workflow failed.")
                         return
                 is_first_capture = False
+                snippet = _get_latest_snippet(lines)
+                if snippet and snippet != last_reported_snippet:
+                    _write(f"  [Watcher] Latest tmux: {snippet}")
+                    last_reported_snippet = snippet
                 time.sleep(2)
                 continue
 
@@ -121,6 +136,11 @@ def main():
                     return
 
                 _write(f"  [AGY] {sline}")
+
+            snippet = _get_latest_snippet(lines)
+            if snippet and snippet != last_reported_snippet:
+                _write(f"  [Watcher] Latest tmux: {snippet}")
+                last_reported_snippet = snippet
 
             time.sleep(2)
     except Exception as e:
