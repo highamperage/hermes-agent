@@ -2482,6 +2482,8 @@ def _refresh_spotify_oauth_state(
     )
 
 
+from hermes_cli.auth_constants import SPOTIFY_ACCESS_TOKEN_REFRESH_SKEW_SECONDS
+
 def resolve_spotify_runtime_credentials(
     *,
     force_refresh: bool = False,
