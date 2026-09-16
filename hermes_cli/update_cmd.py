@@ -15,6 +15,7 @@ import sys
 import time as _time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from hermes_cli.config import get_hermes_home  # noqa: F401  (re-exported; patched via update_cmd)
 from hermes_cli.update_cmd_common import _best_effort
